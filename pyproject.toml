@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hotcb"
+version = "0.1.0"
+description = "Hot-swappable callbacks for training loops (Lightning, HF, or bare PyTorch)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Your Name"}]
+keywords = ["pytorch", "lightning", "huggingface", "callbacks", "training", "debugging"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+dependencies = []  # keep core minimal
+
+[project.optional-dependencies]
+yaml = ["pyyaml>=6.0"]
+lightning = ["lightning>=2.0"]
+hf = ["transformers>=4.30"]
+all = ["pyyaml>=6.0", "lightning>=2.0", "transformers>=4.30"]
+
+[project.scripts]
+hotcb = "hotcb.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

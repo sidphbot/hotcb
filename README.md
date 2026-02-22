@@ -1,0 +1,290 @@
+# hotcb 🔥  
+Hot-swappable callbacks for PyTorch Lightning, HuggingFace Trainer, or bare PyTorch.
+
+Enable, disable, modify, or load new callbacks **while training is running** — without restarting.
+
+---
+
+## ✨ Features
+
+- ✅ Enable / disable callbacks live
+- ✅ Update callback parameters at runtime
+- ✅ Load callbacks from a new Python file path
+- ✅ Works with:
+  - PyTorch Lightning
+  - HuggingFace Trainer
+  - Bare PyTorch loops
+- ✅ No DDP required
+- ✅ CLI helper included
+- ✅ Minimal and framework-agnostic core
+
+---
+
+## 📦 Installation
+
+Core only:
+
+```bash
+pip install hotcb
+```
+
+With YAML support:
+
+```bash
+pip install "hotcb[yaml]"
+```
+
+With Lightning adapter:
+
+```bash
+pip install "hotcb[lightning]"
+```
+
+With HuggingFace adapter:
+
+```bash
+pip install "hotcb[hf]"
+```
+
+Install everything:
+
+```bash
+pip install "hotcb[all]"
+```
+
+---
+
+# 🚀 Quickstart (PyTorch Lightning)
+
+```python
+from hotcb import HotController
+from hotcb.adapters.lightning import HotCallbackController
+import lightning.pytorch as pl
+
+controller = HotController(
+    config_path="runs/exp1/hotcb.yaml",
+    commands_path="runs/exp1/hotcb.commands.jsonl",
+    debounce_steps=5,
+)
+
+trainer = pl.Trainer(
+    callbacks=[HotCallbackController(controller)],
+)
+```
+
+In another terminal:
+
+```bash
+hotcb --dir runs/exp1 init
+hotcb --dir runs/exp1 load print_metrics \
+  --file /tmp/print_metrics.py \
+  --symbol PrintMetricsCallback \
+  --enabled \
+  --init every=20 prefix=[metrics]
+
+hotcb --dir runs/exp1 set print_metrics every=5
+hotcb --dir runs/exp1 disable print_metrics
+```
+
+No restart required.
+
+---
+
+# 🚀 Quickstart (HuggingFace Trainer)
+
+```python
+from hotcb import HotController
+from hotcb.adapters.hf import HotHFCallback
+from transformers import Trainer
+
+controller = HotController(
+    config_path="runs/exp1/hotcb.yaml",
+    commands_path="runs/exp1/hotcb.commands.jsonl",
+)
+
+trainer = Trainer(
+    ...,
+    callbacks=[HotHFCallback(controller)],
+)
+```
+
+---
+
+# 🚀 Bare PyTorch Example
+
+```python
+controller = HotController(
+    config_path="hotcb.yaml",
+    commands_path="hotcb.commands.jsonl",
+)
+
+for step, batch in enumerate(loader):
+    # training logic...
+    controller.apply(
+        env={
+            "step": step,
+            "phase": "train",
+            "model": model,
+            "log": print,
+        },
+        events=["train_step_end"],
+    )
+```
+
+---
+
+# 🧠 Writing a Hot Callback
+
+Minimal contract:
+
+```python
+class MyCallback:
+    def __init__(self, id: str, every: int = 50):
+        self.id = id
+        self.every = every
+
+    def set_params(self, **kwargs):
+        if "every" in kwargs:
+            self.every = int(kwargs["every"])
+
+    def handle(self, event: str, env: dict):
+        step = env.get("step", 0)
+        if step % self.every == 0:
+            env.get("log", print)(f"[{self.id}] step={step}")
+```
+
+That’s it.
+
+---
+
+# 🔄 Loading a Callback Live From a New File
+
+Create `/tmp/my_diag.py`:
+
+```python
+class MyDiag:
+    def __init__(self, id: str, msg: str = "hello"):
+        self.id = id
+        self.msg = msg
+
+    def set_params(self, **kwargs):
+        if "msg" in kwargs:
+            self.msg = kwargs["msg"]
+
+    def handle(self, event, env):
+        step = env.get("step", 0)
+        if step % 30 == 0:
+            env.get("log", print)(f"[{self.id}] {self.msg} step={step}")
+```
+
+Load it:
+
+```bash
+hotcb --dir runs/exp1 load my_diag \
+  --file /tmp/my_diag.py \
+  --symbol MyDiag \
+  --enabled \
+  --init msg="live loaded!"
+```
+
+It starts running immediately.
+
+---
+
+# ⚙ How It Works
+
+`hotcb` has two control mechanisms:
+
+1. `hotcb.yaml` — desired state (optional)
+2. `hotcb.commands.jsonl` — append-only command stream
+
+The controller polls these at safe points and applies changes.
+
+Safe points depend on the adapter:
+
+- Lightning → end of train/val batch
+- HF → end of step / eval
+- Bare torch → wherever you call `apply()`
+
+---
+
+# 🛡 Safety & Design Principles
+
+- No training loop mutation
+- No distributed assumptions
+- Fail-safe: crashing callbacks auto-disable (optional)
+- “Remove” = disable (optional unload supported)
+- No framework internals modified
+
+---
+
+# 🗺 Roadmap
+
+Planned extensions:
+
+- Optional DDP synchronization
+- Web dashboard control plane
+- Built-in diagnostics pack
+- Remote control via socket
+- Structured event tracing
+
+---
+
+# 🧑‍💻 Philosophy
+
+Training shouldn’t require restarts just to inspect something.
+
+`hotcb` treats debugging, diagnostics, and visualization as **live instrumentation**, not static configuration.
+
+---
+
+# 📄 License
+
+MIT License (see LICENSE file).
+
+How users integrate (3 scenarios)
+A) Lightning user
+
+```
+from hotcb import HotController
+from hotcb.adapters.lightning import HotCallbackController
+
+controller = HotController(
+    config_path="runs/exp1/hotcb.yaml",
+    commands_path="runs/exp1/hotcb.commands.jsonl",
+    debounce_steps=5,
+    log_path="runs/exp1/hotcb.log",
+)
+
+trainer = pl.Trainer(callbacks=[HotCallbackController(controller)])
+
+```
+
+Then in another terminal:
+```
+hotcb --dir runs/exp1 init
+hotcb --dir runs/exp1 load print_metrics --file /tmp/print_metrics.py --symbol PrintMetricsCallback --enabled --init every=20 prefix=[m]
+hotcb --dir runs/exp1 set print_metrics every=5
+hotcb --dir runs/exp1 disable print_metrics
+```
+
+
+B) HF Trainer user
+```
+from hotcb import HotController
+from hotcb.adapters.hf import HotHFCallback
+
+controller = HotController(
+    config_path="runs/exp1/hotcb.yaml",
+    commands_path="runs/exp1/hotcb.commands.jsonl",
+    debounce_steps=10,
+)
+trainer = Trainer(callbacks=[HotHFCallback(controller)])
+```
+
+C) Bare PyTorch user
+
+At safe points (end of step / end of eval):
+```
+controller.apply(env={"step": step, "log": print, ...}, events=["train_step_end"])
+```
