@@ -24,6 +24,12 @@ yaml = ["pyyaml>=6.0"]
 lightning = ["lightning>=2.0"]
 hf = ["transformers>=4.30"]
 all = ["pyyaml>=6.0", "lightning>=2.0", "transformers>=4.30"]
+docs = [
+  "mkdocs",
+  "mkdocs-material",
+  "mkdocstrings[python]",
+  "mkdocs-awesome-pages-plugin",
+]
 
 [project.scripts]
 hotcb = "hotcb.cli:main"

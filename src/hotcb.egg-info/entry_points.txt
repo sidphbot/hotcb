@@ -1,0 +1,2 @@
+[console_scripts]
+hotcb = hotcb.cli:main

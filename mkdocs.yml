@@ -1,0 +1,39 @@
+site_name: hotcb
+repo_url: https://github.com/<YOUR_ORG_OR_USER>/<YOUR_REPO>
+repo_name: <YOUR_REPO>
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: numpy      # your docstrings are NumPy-style
+            show_source: false
+            show_signature_annotations: true
+            separate_signature: true
+            heading_level: 2
+            members_order: source
+            inherited_members: true
+            merge_init_into_class: true
+            docstring_section_style: spacy  # optional; makes sections nice
+            show_root_heading: true
+            show_root_full_path: false
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts: concepts.md
+  - API:
+      - Overview: api/index.md
+      - Controller: api/controller.md
+      - Adapters: api/adapters.md
+      - Callbacks: api/callbacks.md

@@ -1,3 +1,33 @@
+Metadata-Version: 2.4
+Name: hotcb
+Version: 0.1.0
+Summary: Hot-swappable callbacks for training loops (Lightning, HF, or bare PyTorch)
+Author: Your Name
+License: MIT
+Keywords: pytorch,lightning,huggingface,callbacks,training,debugging
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Provides-Extra: yaml
+Requires-Dist: pyyaml>=6.0; extra == "yaml"
+Provides-Extra: lightning
+Requires-Dist: lightning>=2.0; extra == "lightning"
+Provides-Extra: hf
+Requires-Dist: transformers>=4.30; extra == "hf"
+Provides-Extra: all
+Requires-Dist: pyyaml>=6.0; extra == "all"
+Requires-Dist: lightning>=2.0; extra == "all"
+Requires-Dist: transformers>=4.30; extra == "all"
+Provides-Extra: docs
+Requires-Dist: mkdocs; extra == "docs"
+Requires-Dist: mkdocs-material; extra == "docs"
+Requires-Dist: mkdocstrings[python]; extra == "docs"
+Requires-Dist: mkdocs-awesome-pages-plugin; extra == "docs"
+Dynamic: license-file
+
 # hotcb 🔥  
 Hot-swappable callbacks for PyTorch Lightning, HuggingFace Trainer, or bare PyTorch.
 
@@ -87,138 +117,6 @@ hotcb --dir runs/exp1 disable print_metrics
 ```
 
 No restart required.
-
----
-
-## Callback Parallels: Torch vs Lightning vs HF vs hotcb
-
-`hotcb` is a thin portability layer: it lets you write one callback once, then run it across
-PyTorch Lightning, HuggingFace Trainer, or bare PyTorch by mapping framework hook arguments into a
-small, normalized `env` dictionary.
-
-### Hook signatures side-by-side
-
-| Ecosystem | Typical “step end” callback hook | What you receive |
-|---|---|---|
-| **Bare PyTorch** | *(you define it)* e.g. `on_step_end(step, batch, outputs, loss, model, optimizer)` | Whatever you pass |
-| **Lightning** | `on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)` | `trainer`, `pl_module`, `outputs`, `batch`, `batch_idx` |
-| **HF Trainer** | `on_step_end(args, state, control, **kwargs)` | `args`, `state`, `control`, plus context-dependent `kwargs` |
-| **hotcb** | `handle(event: str, env: dict)` | `event` string + a normalized `env` |
-
-### How framework args map into `env`
-
-`env` is intentionally small and predictable. Adapters fill it from the native framework objects:
-
-| `env` key | Lightning (source) | HF Trainer (source) | Bare PyTorch (source) |
-|---|---|---|---|
-| `env["step"]` | `trainer.global_step` | `state.global_step` | loop `step` |
-| `env["epoch"]` | `trainer.current_epoch` | `state.epoch` | loop `epoch` |
-| `env["phase"]` | adapter sets `"train"/"val"` | adapter sets `"train"/"eval"` | you set it |
-| `env["model"]` | `pl_module` | *(adapter-provided)* | your model |
-| `env["batch"]` | `batch` | *(adapter-provided)* | your batch |
-| `env["outputs"]` | `outputs` | *(optional)* | your outputs |
-| `env["log"]` | adapter wraps `trainer.print` | adapter wraps `print` | your logger |
-
-> `env` is a portability contract. If you want extra fields, you can always include them in `env`
-> from your own loop, or extend adapters later — but the minimal set above keeps callbacks simple
-> and avoids accidental retention of large tensors.
-
----
-
-## Example: the same callback implemented 4 ways
-
-All four variants below do the same thing:
-- print once every `every` steps
-- easy to tune `every`
-- the hotcb version supports runtime updates via the CLI (`hotcb set ...`)
-
-### 1) PyTorch Lightning callback
-
-```python
-import lightning.pytorch as pl
-
-class PrintEveryN_Lightning(pl.Callback):
-    def __init__(self, every: int = 50, prefix: str = "[metrics]"):
-        self.every = int(every)
-        self.prefix = str(prefix)
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        step = int(trainer.global_step)
-        if self.every > 0 and (step % self.every) == 0:
-            trainer.print(f"{self.prefix} step={step} batch_idx={batch_idx}")
-```
-
-### 2) HuggingFace Trainer callback
-
-```python
-from transformers import TrainerCallback
-
-class PrintEveryN_HF(TrainerCallback):
-    def __init__(self, every: int = 50, prefix: str = "[metrics]"):
-        self.every = int(every)
-        self.prefix = str(prefix)
-
-    def on_step_end(self, args, state, control, **kwargs):
-        step = int(state.global_step)
-        if self.every > 0 and (step % self.every) == 0:
-            print(f"{self.prefix} step={step}")
-        return control
-```
-
-### 3) Bare PyTorch “hook style”
-
-```python
-class PrintEveryN_TorchHook:
-    def __init__(self, every: int = 50, prefix: str = "[metrics]"):
-        self.every = int(every)
-        self.prefix = str(prefix)
-
-    def on_step_end(self, step: int, batch_idx: int):
-        if self.every > 0 and (step % self.every) == 0:
-            print(f"{self.prefix} step={step} batch_idx={batch_idx}")
-```
-
-Usage:
-
-```python
-hook = PrintEveryN_TorchHook(every=50)
-
-for step, batch in enumerate(loader):
-    # forward/backward/step...
-    hook.on_step_end(step=step, batch_idx=step)
-```
-
-### 4) hotcb callback (portable + hot-adjustable)
-
-```python
-class PrintEveryN_HotCB:
-    def __init__(self, id: str, every: int = 50, prefix: str = "[metrics]"):
-        self.id = id
-        self.every = int(every)
-        self.prefix = str(prefix)
-
-    def set_params(self, **kwargs):
-        if "every" in kwargs:
-            self.every = int(kwargs["every"])
-        if "prefix" in kwargs:
-            self.prefix = str(kwargs["prefix"])
-
-    def handle(self, event: str, env: dict):
-        step = int(env.get("step", 0))
-        batch_idx = env.get("batch_idx", None)
-        log = env.get("log", print)
-
-        if self.every > 0 and (step % self.every) == 0:
-            log(f"{self.prefix} id={self.id} step={step} event={event} batch_idx={batch_idx}")
-```
-
-Runtime tuning (no restart):
-
-```bash
-hotcb --dir runs/exp1 set print_metrics every=5
-```
-
----
 
 ---
 
