@@ -12,6 +12,8 @@ from .loader import instantiate_callback
 from .ops import Op
 from .protocol import CallbackTarget
 from .util import FileCursor, read_new_jsonl, safe_mtime
+from dataclasses import dataclass, field
+from .util import FileCursor, read_new_jsonl, safe_mtime
 
 
 @dataclass
@@ -60,6 +62,7 @@ class CallbackHandle:
     target: Optional[CallbackTarget] = None
     init: Dict[str, Any] = field(default_factory=dict)
     last_params: Dict[str, Any] = field(default_factory=dict)
+    loaded_target_mtime: float = 0.0
 
 
 class HotController:
@@ -298,6 +301,40 @@ class HotController:
             return
         self._last_poll_t = now
 
+        for cb_id, h in list(self._handles.items()):
+            if h.instance is None or h.target is None:
+                continue
+            if h.target.kind != "python_file":
+                continue
+
+            cur_m = safe_mtime(h.target.path)
+            # If file exists and advanced since last load, reload callback instance
+            if cur_m > 0 and cur_m > (h.loaded_target_mtime or 0.0):
+                try:
+                    # Recreate the instance from the (reloaded) file/module
+                    h.instance = instantiate_callback(h.target, h.init, force_reload=True)
+                    h.loaded_target_mtime = cur_m
+
+                    if hasattr(h.instance, "on_attach"):
+                        h.instance.on_attach(env)
+
+                    # Re-apply last known params after reload
+                    if h.last_params and hasattr(h.instance, "set_params"):
+                        try:
+                            h.instance.set_params(**h.last_params)
+                        except Exception as e:
+                            self._log(env, f"[hotcb] set_params after reload failed {cb_id}: {e}")
+                            if self.auto_disable_on_error:
+                                h.enabled = False
+                                self._log(env, f"[hotcb] auto-disabled {cb_id} after reload set_params error")
+
+                    self._log(env, f"[hotcb] auto-reloaded {cb_id} from file (mtime={cur_m})")
+                except Exception as e:
+                    self._log(env, f"[hotcb] auto-reload failed {cb_id}: {e}")
+                    if self.auto_disable_on_error:
+                        h.enabled = False
+                        self._log(env, f"[hotcb] auto-disabled {cb_id} after reload failure")
+
         ops: List[Op] = []
 
         cfg_mtime = safe_mtime(self.config_path)
@@ -426,8 +463,13 @@ class HotController:
             if h.instance is None:
                 try:
                     h.instance = instantiate_callback(h.target, h.init)
+                    # NEW: record file mtime on first load (python_file only)
+                    if h.target.kind == "python_file":
+                        h.loaded_target_mtime = safe_mtime(h.target.path)
+
                     if hasattr(h.instance, "on_attach"):
                         h.instance.on_attach(env)
+
                     self._log(
                         env,
                         f"[hotcb] loaded callback {op.id} from {h.target.kind}:{h.target.path}:{h.target.symbol}",

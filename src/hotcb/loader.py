@@ -26,6 +26,13 @@ class CallbackLoadError(RuntimeError):
     pass
 
 
+def _dyn_module_name_for_file(file_path: str) -> str:
+    """
+    Deterministically derive the dynamic module name for a python_file target.
+    """
+    return f"hotcb_dyn_{abs(hash(file_path))}"
+
+
 def _load_class_from_module(module_path: str, symbol: str) -> Type:
     """
     Import a class or callable from an importable Python module.
@@ -60,11 +67,10 @@ def _load_class_from_module(module_path: str, symbol: str) -> Type:
         raise CallbackLoadError(f"Module '{module_path}' has no symbol '{symbol}'") from e
 
 
-def _load_class_from_file(file_path: str, symbol: str) -> Type:
+def _load_class_from_file(file_path: str, symbol: str, *, force_reload: bool = False) -> Type:
     """
     Load a class or callable from a Python source file (.py) at a filesystem path.
-
-    This enables "hot loading" a brand-new callback file created during runtime.
+        This enables "hot loading" a brand-new callback file created during runtime.
 
     Parameters
     ----------
@@ -78,34 +84,30 @@ def _load_class_from_file(file_path: str, symbol: str) -> Type:
     -------
     type
         The loaded class/type.
-
-    Raises
-    ------
-    CallbackLoadError
-        If the file cannot be imported or the symbol is missing.
-
-    Notes
-    -----
-    - A unique module name is derived from hash(file_path) to avoid collisions.
-    - Re-loading the same path will reuse the same module name; Python's module
-      caching will apply. If you want auto-reload-on-change, implement explicit
-      reload semantics (not included in this baseline).
-
-    Example
-    -------
-    Suppose /tmp/my_diag.py contains:
-      class MyDiag: ...
-    >>> cls = _load_class_from_file("/tmp/my_diag.py", "MyDiag")
-    >>> cb = cls(id="my_diag")
+    If force_reload=True and the module has been loaded before, reload it to
+    pick up code changes.
     """
-    module_name = f"hotcb_dyn_{abs(hash(file_path))}"
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None or spec.loader is None:
-        raise CallbackLoadError(f"Cannot import file '{file_path}'")
+    module_name = _dyn_module_name_for_file(file_path)
 
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = mod
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    if force_reload and module_name in sys.modules:
+        # Reload the existing module (it must have a spec)
+        mod = sys.modules[module_name]
+        try:
+            mod = importlib.reload(mod)
+        except Exception as e:
+            raise CallbackLoadError(f"Failed to reload file '{file_path}': {e}") from e
+    else:
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        if spec is None or spec.loader is None:
+            raise CallbackLoadError(f"Cannot import file '{file_path}'")
+
+        mod = importlib.util.module_from_spec(spec)
+        # Critical for reload(): module must have __spec__ and be in sys.modules
+        sys.modules[module_name] = mod
+        try:
+            spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+        except Exception as e:
+            raise CallbackLoadError(f"Cannot exec file '{file_path}': {e}") from e
 
     try:
         return getattr(mod, symbol)
@@ -113,10 +115,9 @@ def _load_class_from_file(file_path: str, symbol: str) -> Type:
         raise CallbackLoadError(f"File '{file_path}' has no symbol '{symbol}'") from e
 
 
-def load_callback_class(target: CallbackTarget) -> Type:
+def load_callback_class(target: CallbackTarget, *, force_reload: bool = False) -> Type:
     """
     Load callback class specified by `CallbackTarget`.
-
     Parameters
     ----------
     target:
@@ -141,15 +142,26 @@ def load_callback_class(target: CallbackTarget) -> Type:
     -------
     >>> target = CallbackTarget(kind="module", path="hotcb.callbacks.timing", symbol="TimingCallback")
     >>> cls = load_callback_class(target)
+    force_reload:
+      - module: uses importlib.reload(module) when True
+      - python_file: reloads the derived dynamic module when True
     """
     if target.kind == "module":
-        return _load_class_from_module(target.path, target.symbol)
+        mod = importlib.import_module(target.path)
+        if force_reload:
+            mod = importlib.reload(mod)
+        try:
+            return getattr(mod, target.symbol)
+        except AttributeError as e:
+            raise CallbackLoadError(f"Module '{target.path}' has no symbol '{target.symbol}'") from e
+
     if target.kind == "python_file":
-        return _load_class_from_file(target.path, target.symbol)
+        return _load_class_from_file(target.path, target.symbol, force_reload=force_reload)
+
     raise CallbackLoadError(f"Unknown target.kind: {target.kind}")
 
 
-def instantiate_callback(target: CallbackTarget, init_kwargs: Dict[str, Any]) -> Any:
+def instantiate_callback(target: CallbackTarget, init_kwargs: Dict[str, Any], *, force_reload: bool = False) -> Any:
     """
     Instantiate a callback from a target + init kwargs.
 
@@ -182,5 +194,5 @@ def instantiate_callback(target: CallbackTarget, init_kwargs: Dict[str, Any]) ->
     ...   {"id": "hb", "every": 10}
     ... )
     """
-    cls = load_callback_class(target)
+    cls = load_callback_class(target, force_reload=force_reload)
     return cls(**init_kwargs)
