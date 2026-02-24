@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "Hot-swappable callbacks for training loops (Lightning, HF, or bare PyTorch)"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
-authors = [{name = "Your Name"}]
+license = {file = "LICENSE"}
+authors = [{name = "Sidharth Pal"}]
 keywords = ["pytorch", "lightning", "huggingface", "callbacks", "training", "debugging"]
 classifiers = [
   "Programming Language :: Python :: 3",
