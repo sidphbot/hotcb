@@ -39,7 +39,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest
+          python -m pytest --cov=src/hotcb --cov-report=term-missing
 
   build:
     needs: tests

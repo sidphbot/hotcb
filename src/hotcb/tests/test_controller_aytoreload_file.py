@@ -7,7 +7,7 @@ import time
 
 from hotcb.controller import HotController
 
-from .conftest import make_env
+from hotcb.tests.conftest import make_env
 
 
 def _write_cb(path, version: str):

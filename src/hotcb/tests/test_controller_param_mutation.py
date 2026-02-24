@@ -5,7 +5,7 @@ import json
 
 from hotcb.controller import HotController
 
-from .conftest import make_env
+from hotcb.tests.conftest import make_env
 
 
 def test_param_mutation_runtime_and_deferred_apply(tmp_path):

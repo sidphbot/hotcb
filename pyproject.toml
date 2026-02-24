@@ -37,7 +37,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --disable-warnings --maxfail=1 --cov=hotcb --cov-report=term-missing"
+addopts = "-q --disable-warnings --maxfail=1 --cov=src/hotcb --cov-report=term-missing"
 
 [project.scripts]
 hotcb = "hotcb.cli:main"
@@ -47,3 +47,12 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/hotcb"]
+
+[tool.coverage.report]
+omit = [
+  "src/hotcb/tests/*",
+]

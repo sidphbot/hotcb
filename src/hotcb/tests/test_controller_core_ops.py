@@ -5,7 +5,7 @@ import json
 
 from hotcb.controller import HotController
 
-from .conftest import make_env
+from hotcb.tests.conftest import make_env
 
 
 def test_enable_disable_unload_and_status(tmp_path):

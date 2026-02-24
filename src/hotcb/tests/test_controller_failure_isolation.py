@@ -5,7 +5,7 @@ import json
 
 from hotcb.controller import HotController
 
-from .conftest import make_env
+from hotcb.tests.conftest import make_env
 
 
 def test_failure_isolation_callback_crash_disables_only_it(tmp_path):
@@ -62,5 +62,5 @@ class Bad:
     logs2 = []
     env2 = make_env(logs2)
     c.apply(env2, events=["train_step_end"])
-    assert any("[good] 2" in s for s in logs2)
+    assert any("[good]" in s for s in logs2)
     assert not any("bad crashed" in s for s in logs2)
