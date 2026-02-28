@@ -1,6 +1,6 @@
 site_name: hotcb
-repo_url: https://github.com/<YOUR_ORG_OR_USER>/<YOUR_REPO>
-repo_name: <YOUR_REPO>
+repo_url: https://github.com/sidphbot/hotcb
+repo_name: sidphbot/hotcb
 
 theme:
   name: material
@@ -16,7 +16,7 @@ plugins:
       handlers:
         python:
           options:
-            docstring_style: numpy      # your docstrings are NumPy-style
+            docstring_style: numpy
             show_source: false
             show_signature_annotations: true
             separate_signature: true
@@ -24,16 +24,29 @@ plugins:
             members_order: source
             inherited_members: true
             merge_init_into_class: true
-            docstring_section_style: spacy  # optional; makes sections nice
+            docstring_section_style: spacy
             show_root_heading: true
             show_root_full_path: false
 
 nav:
   - Home: index.md
-  - Getting started: getting-started.md
+  - Getting Started: getting-started.md
   - Concepts: concepts.md
+  - CLI Reference: cli.md
+  - Formats: formats.md
+  - Replay: replay.md
+  - Modules:
+      - Callbacks (cb): modules/cb.md
+      - Optimizer (opt): modules/hotopt.md
+      - Loss (loss): modules/hotloss.md
   - API:
       - Overview: api/index.md
       - Controller: api/controller.md
       - Adapters: api/adapters.md
       - Callbacks: api/callbacks.md
+      - Config: api/config.md
+      - CLI: api/cli.md
+      - Loader: api/loader.md
+  - Examples:
+      - CLI Walkthrough: examples/cli_walkthrough.md
+      - Custom Callback: examples/custom_callback_example.py

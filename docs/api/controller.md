@@ -1,4 +1,4 @@
 # Controller
 
-::: hotcb.controller.HotController
-::: hotcb.controller.CallbackHandle
+::: hotcb.modules.cb.controller.HotController
+::: hotcb.modules.cb.controller.CallbackHandle

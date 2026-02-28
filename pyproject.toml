@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hotcb"
-version = "0.1.0"
-description = "Hot-swappable callbacks for training loops (Lightning, HF, or bare PyTorch)"
+version = "2.0.0"
+description = "Live training control plane — callbacks, optimizer, and loss control with step-indexed ledger and deterministic replay"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
 authors = [{name = "Sidharth Pal"}]
-keywords = ["pytorch", "lightning", "huggingface", "callbacks", "training", "debugging"]
+keywords = ["pytorch", "lightning", "huggingface", "callbacks", "training", "debugging", "optimizer", "live-control"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -33,10 +33,12 @@ docs = [
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
+  "torch>=2.0",
+  "tensorboard>=2.13",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["src/hotcb/tests", "src/hotcb/tests/cb"]
 addopts = "-q --disable-warnings --maxfail=1 --cov=src/hotcb --cov-report=term-missing"
 
 [project.scripts]
@@ -55,4 +57,5 @@ source = ["src/hotcb"]
 [tool.coverage.report]
 omit = [
   "src/hotcb/tests/*",
+  "src/hotcb/tests/cb/*",
 ]

@@ -1,4 +1,3 @@
-# src/hotcb/cli.py
 from __future__ import annotations
 
 import argparse
@@ -6,130 +5,30 @@ import json
 import os
 from typing import Any, Dict, List
 
-DEFAULT_CONFIG = """version: 1
-callbacks: {}
-"""
-
-
-def _ensure_dir(p: str) -> None:
-    """
-    Ensure directory exists (mkdir -p behavior).
-
-    Parameters
-    ----------
-    p:
-        Directory path. If empty, does nothing.
-
-    Notes
-    -----
-    This is used for `--dir` run directory creation and for output file dirs.
-    """
-    if not p:
-        return
-    os.makedirs(p, exist_ok=True)
+from .util import append_jsonl, ensure_dir
 
 
 def _cmd_path(run_dir: str) -> str:
-    """
-    Compute the canonical commands JSONL path for a run directory.
-
-    Parameters
-    ----------
-    run_dir:
-        Run directory. Typically a folder containing:
-          - hotcb.yaml
-          - hotcb.commands.jsonl
-          - hotcb.log (optional)
-
-    Returns
-    -------
-    str
-        <run_dir>/hotcb.commands.jsonl
-    """
     return os.path.join(run_dir, "hotcb.commands.jsonl")
 
 
 def _cfg_path(run_dir: str) -> str:
-    """
-    Compute the canonical YAML config path for a run directory.
-
-    Parameters
-    ----------
-    run_dir:
-        Run directory path.
-
-    Returns
-    -------
-    str
-        <run_dir>/hotcb.yaml
-    """
     return os.path.join(run_dir, "hotcb.yaml")
 
 
-def _append_cmd(run_dir: str, obj: Dict[str, Any]) -> None:
-    """
-    Append a single JSON object as a line to the commands JSONL file.
+def _applied_path(run_dir: str) -> str:
+    return os.path.join(run_dir, "hotcb.applied.jsonl")
 
-    Parameters
-    ----------
-    run_dir:
-        Run directory containing hotcb.commands.jsonl (created if missing).
 
-    obj:
-        JSON-serializable dict representing a controller command.
-        Common forms:
-          - {"op":"enable","id":"cb1"}
-          - {"op":"set_params","id":"cb1","params":{"every":10}}
-          - {"op":"load","id":"cb2","target":{...},"init":{...},"enabled":true}
+def _recipe_path(run_dir: str) -> str:
+    return os.path.join(run_dir, "hotcb.recipe.jsonl")
 
-    Notes
-    -----
-    - Commands are append-only to preserve an audit trail.
-    - `HotController` reads only new lines via byte offset cursor.
-    """
-    _ensure_dir(run_dir)
-    p = _cmd_path(run_dir)
-    with open(p, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+def _freeze_path(run_dir: str) -> str:
+    return os.path.join(run_dir, "hotcb.freeze.json")
 
 
 def _parse_kv(pairs: List[str]) -> Dict[str, Any]:
-    """
-    Parse CLI key=value pairs into a dict with light type inference.
-
-    Accepted types
-    --------------
-    - "true"/"false" (case-insensitive) -> bool
-    - integers -> int
-    - floats -> float
-    - JSON objects/arrays if the value begins with '{' or '[' -> parsed via json.loads
-    - otherwise -> string (as provided by the shell after its own quote processing)
-
-    Parameters
-    ----------
-    pairs:
-        List of strings, each in the form "key=value".
-
-        Examples:
-          - ["every=10", "prefix=[m]"]
-          - ["threshold=0.25", "enabled=true"]
-          - ["paths=[\"loss\",\"outputs.logits\"]"]   # JSON
-
-    Returns
-    -------
-    Dict[str, Any]
-        Parsed mapping.
-
-    Raises
-    ------
-    SystemExit
-        If any item is not in key=value form.
-
-    Example
-    -------
-    >>> _parse_kv(["every=10", "gpu=true", "meta={\"a\":1}"])
-    {'every': 10, 'gpu': True, 'meta': {'a': 1}}
-    """
     out: Dict[str, Any] = {}
     for s in pairs:
         if "=" not in s:
@@ -138,7 +37,7 @@ def _parse_kv(pairs: List[str]) -> Dict[str, Any]:
         v = v.strip()
 
         if v.lower() in ("true", "false"):
-            out[k] = (v.lower() == "true")
+            out[k] = v.lower() == "true"
             continue
 
         if v.startswith("{") or v.startswith("["):
@@ -162,224 +61,376 @@ def _parse_kv(pairs: List[str]) -> Dict[str, Any]:
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    """
-    CLI subcommand: `hotcb init`
-
-    Creates (if missing) in --dir:
-      - hotcb.yaml (empty template)
-      - hotcb.commands.jsonl (empty file)
-
-    This is a convenience to bootstrap a run directory.
-
-    Example
-    -------
-    $ hotcb --dir runs/exp1 init
-    """
     run_dir = args.dir
-    _ensure_dir(run_dir)
-
+    ensure_dir(run_dir)
     cfg = _cfg_path(run_dir)
     if not os.path.exists(cfg):
         with open(cfg, "w", encoding="utf-8") as f:
-            f.write(DEFAULT_CONFIG)
+            f.write("version: 1\n")
         print(f"Wrote {cfg}")
     else:
         print(f"Exists: {cfg}")
 
-    cmdp = _cmd_path(run_dir)
-    if not os.path.exists(cmdp):
-        with open(cmdp, "w", encoding="utf-8") as f:
-            pass
-        print(f"Created {cmdp}")
-    else:
-        print(f"Exists: {cmdp}")
+    for p in [_cmd_path(run_dir), _applied_path(run_dir), _recipe_path(run_dir), _freeze_path(run_dir)]:
+        if not os.path.exists(p):
+            ensure_dir(os.path.dirname(p))
+            with open(p, "w", encoding="utf-8") as f:
+                pass
+            print(f"Created {p}")
+        else:
+            print(f"Exists: {p}")
 
 
-def cmd_enable(args: argparse.Namespace) -> None:
-    """
-    CLI subcommand: `hotcb enable <id>`
-
-    Appends an enable op to commands.jsonl.
-
-    Example
-    -------
-    $ hotcb --dir runs/exp1 enable feat_viz
-    """
-    _append_cmd(args.dir, {"op": "enable", "id": args.id})
-    print(f"Enabled {args.id}")
+def _append_command(run_dir: str, obj: Dict[str, Any]) -> None:
+    append_jsonl(_cmd_path(run_dir), obj)
 
 
-def cmd_disable(args: argparse.Namespace) -> None:
-    """
-    CLI subcommand: `hotcb disable <id>`
-
-    Appends a disable op to commands.jsonl.
-
-    Example
-    -------
-    $ hotcb --dir runs/exp1 disable feat_viz
-    """
-    _append_cmd(args.dir, {"op": "disable", "id": args.id})
-    print(f"Disabled {args.id}")
-
-
-def cmd_set(args: argparse.Namespace) -> None:
-    """
-    CLI subcommand: `hotcb set <id> key=value ...`
-
-    Appends a set_params op to commands.jsonl.
-
-    Examples
-    --------
-    $ hotcb --dir runs/exp1 set timing every=10 window=200
-    $ hotcb --dir runs/exp1 set tstats paths=loss,outputs.logits every=25
-    $ hotcb --dir runs/exp1 set guard raise_on_trigger=true
-    """
-    params = _parse_kv(args.kv)
-    _append_cmd(args.dir, {"op": "set_params", "id": args.id, "params": params})
-    print(f"Set params for {args.id}: {list(params.keys())}")
+def cmd_cb(args: argparse.Namespace) -> None:
+    op = args.cb_command
+    obj: Dict[str, Any] = {"module": "cb", "op": op, "id": args.id}
+    if op == "set_params":
+        obj["params"] = _parse_kv(args.kv or [])
+    if op == "load":
+        if not args.file and not args.path:
+            raise SystemExit("Provide --file for python_file or --path for module import")
+        obj["target"] = {"kind": "python_file" if args.file else "module", "path": args.file or args.path, "symbol": args.symbol}
+        obj["init"] = _parse_kv(args.init or [])
+        if args.enabled is not None:
+            obj["enabled"] = args.enabled
+    _append_command(args.dir, obj)
+    print(f"queued cb {op} for {args.id}")
 
 
-def cmd_load(args: argparse.Namespace) -> None:
-    """
-    CLI subcommand: `hotcb load <id> ...`
+def cmd_opt(args: argparse.Namespace) -> None:
+    op = args.opt_command
+    obj: Dict[str, Any] = {"module": "opt", "op": op, "id": args.id}
+    if op == "set_params":
+        obj["params"] = _parse_kv(args.kv or [])
+    _append_command(args.dir, obj)
+    print(f"queued opt {op} for {args.id}")
 
-    Load a callback from a Python module path OR from a Python file path.
 
-    Required flags
-    --------------
-    Exactly one of:
-      --file   /path/to/callback.py
-      --module mypkg.callbacks.foo
+def cmd_loss(args: argparse.Namespace) -> None:
+    op = args.loss_command
+    obj: Dict[str, Any] = {"module": "loss", "op": op, "id": args.id}
+    if op == "set_params":
+        obj["params"] = _parse_kv(args.kv or [])
+    _append_command(args.dir, obj)
+    print(f"queued loss {op} for {args.id}")
 
-    And:
-      --symbol <ClassName>
 
-    Optional flags
-    --------------
-    --enabled
-        If provided, enable immediately after loading.
-
-    --init key=value ...
-        Constructor kwargs for the callback (applied only on first instantiation).
-        If you pass `id`, it will be overwritten by controller to match <id>.
-
-    Examples
-    --------
-    Load from a file:
-      $ hotcb --dir runs/exp1 load my_diag --file /tmp/my_diag.py --symbol MyDiag --enabled --init msg="hello"
-
-    Load from a module:
-      $ hotcb --dir runs/exp1 load timing --module hotcb.callbacks.timing --symbol TimingCallback --enabled --init every=50 window=200
-    """
-    init = _parse_kv(args.init or [])
-    if args.file:
-        target = {"kind": "python_file", "path": args.file, "symbol": args.symbol}
-    else:
-        target = {"kind": "module", "path": args.module, "symbol": args.symbol}
-
-    payload: Dict[str, Any] = {
-        "op": "load",
-        "id": args.id,
-        "target": target,
-        "init": init,
-        "enabled": bool(args.enabled),
+def cmd_freeze(args: argparse.Namespace) -> None:
+    cfg = {
+        "mode": args.mode,
+        "recipe_path": args.recipe,
+        "adjust_path": args.adjust,
+        "policy": args.policy,
+        "step_offset": args.step_offset,
     }
-    _append_cmd(args.dir, payload)
-    print(f"Loaded {args.id} from {target['kind']}:{target['path']}:{target['symbol']} (enabled={args.enabled})")
+    ensure_dir(args.dir)
+    with open(_freeze_path(args.dir), "w", encoding="utf-8") as f:
+        f.write(json.dumps(cfg))
+    print(f"Wrote freeze state -> {_freeze_path(args.dir)}")
 
 
-def cmd_unload(args: argparse.Namespace) -> None:
-    """
-    CLI subcommand: `hotcb unload <id>`
+_OPT_KEYS = {"lr", "weight_decay", "clip_norm", "scheduler_scale", "scheduler_drop", "group", "groups"}
 
-    Unloads the callback instance from memory (optional feature).
-    This also disables the callback.
 
-    Use this when:
-      - you want to free resources (files, threads),
-      - you no longer need the callback and want to reset its state.
+def _infer_module(keys: set) -> str:
+    """Auto-route kv keys to opt or loss module (spec §15.4)."""
+    if keys & _OPT_KEYS:
+        return "opt"
+    for k in keys:
+        if k.endswith("_w") or k.startswith("terms.") or k.startswith("ramps."):
+            return "loss"
+    raise SystemExit(
+        f"Cannot auto-route keys {keys} to opt or loss. Use explicit subcommand."
+    )
 
-    Example
-    -------
-    $ hotcb --dir runs/exp1 unload feat_viz
-    """
-    _append_cmd(args.dir, {"op": "unload", "id": args.id})
-    print(f"Unloaded {args.id}")
+
+def cmd_status(args: argparse.Namespace) -> None:
+    run_dir = args.dir
+    # Freeze state
+    fp = _freeze_path(run_dir)
+    freeze = {}
+    if os.path.exists(fp) and os.path.getsize(fp) > 0:
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                freeze = json.load(f)
+        except Exception:
+            pass
+    print(f"Freeze mode: {freeze.get('mode', 'off')}")
+    if freeze.get("recipe_path"):
+        print(f"  recipe: {freeze['recipe_path']}")
+    if freeze.get("adjust_path"):
+        print(f"  adjust: {freeze['adjust_path']}")
+    if freeze.get("policy"):
+        print(f"  policy: {freeze['policy']}")
+
+    # Latest applied entries per module
+    applied = _applied_path(run_dir)
+    if not os.path.exists(applied):
+        print("No applied ledger found.")
+        return
+    latest: Dict[str, dict] = {}
+    try:
+        with open(applied, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                mod = rec.get("module", "")
+                key = f"{mod}:{rec.get('id', '')}"
+                latest[key] = rec
+    except Exception:
+        pass
+    if latest:
+        print(f"\nLast applied entries ({len(latest)} handles):")
+        for key, rec in latest.items():
+            decision = rec.get("decision", "?")
+            step = rec.get("step", "?")
+            op = rec.get("op", "?")
+            print(f"  {key}: {op} @ step {step} [{decision}]")
+
+
+def cmd_sugar_enable(args: argparse.Namespace) -> None:
+    """Syntactic sugar: `hotcb enable <id>` defaults to cb."""
+    obj: Dict[str, Any] = {"module": "cb", "op": "enable", "id": args.id}
+    _append_command(args.dir, obj)
+    print(f"queued cb enable for {args.id}")
+
+
+def cmd_sugar_disable(args: argparse.Namespace) -> None:
+    """Syntactic sugar: `hotcb disable <id>` defaults to cb."""
+    obj: Dict[str, Any] = {"module": "cb", "op": "disable", "id": args.id}
+    _append_command(args.dir, obj)
+    print(f"queued cb disable for {args.id}")
+
+
+def cmd_sugar_set(args: argparse.Namespace) -> None:
+    """Syntactic sugar: `hotcb set k=v` auto-routes to opt or loss."""
+    params = _parse_kv(args.kv or [])
+    module = _infer_module(set(params.keys()))
+    obj: Dict[str, Any] = {"module": module, "op": "set_params", "id": args.id, "params": params}
+    _append_command(args.dir, obj)
+    print(f"queued {module} set_params for {args.id}")
+
+
+def cmd_recipe_validate(args: argparse.Namespace) -> None:
+    """Validate a recipe file for schema correctness."""
+    path = args.recipe or _recipe_path(args.dir)
+    if not os.path.exists(path):
+        print(f"Recipe file not found: {path}")
+        raise SystemExit(1)
+    errors: List[str] = []
+    entries = 0
+    required_fields = {"at", "module", "op"}
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                errors.append(f"  line {i}: invalid JSON: {e}")
+                continue
+            entries += 1
+            missing = required_fields - set(rec.keys())
+            if missing:
+                errors.append(f"  line {i}: missing fields: {missing}")
+            at = rec.get("at", {})
+            if not isinstance(at, dict) or "step" not in at:
+                errors.append(f"  line {i}: 'at' must contain 'step'")
+            if rec.get("module") not in {"cb", "opt", "loss"}:
+                errors.append(f"  line {i}: module must be cb/opt/loss, got '{rec.get('module')}'")
+    if errors:
+        print(f"Recipe {path}: {len(errors)} errors in {entries} entries:")
+        for e in errors:
+            print(e)
+        raise SystemExit(1)
+    print(f"Recipe {path}: {entries} entries, valid.")
+
+
+def cmd_recipe_patch_template(args: argparse.Namespace) -> None:
+    """Generate a YAML patch template from a recipe file."""
+    recipe_path = args.recipe
+    output_path = args.output
+    if not os.path.exists(recipe_path):
+        print(f"Recipe file not found: {recipe_path}")
+        raise SystemExit(1)
+
+    seen: list = []
+    seen_keys: set = set()
+    try:
+        with open(recipe_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                key = (rec.get("module"), rec.get("op"), rec.get("id"))
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    seen.append({"module": rec.get("module", ""), "op": rec.get("op", ""), "id": rec.get("id", "")})
+    except FileNotFoundError:
+        print(f"Recipe file not found: {recipe_path}")
+        raise SystemExit(1)
+
+    lines: List[str] = [
+        f"# Generated from {recipe_path}",
+        "patches:",
+    ]
+    for entry in seen:
+        lines.append("  - match:")
+        lines.append(f"      module: {entry['module']}")
+        lines.append(f"      op: {entry['op']}")
+        lines.append(f"      id: {entry['id']}")
+        lines.append("    # replace_params: {}")
+        lines.append("    # shift_step: 0")
+        lines.append("    # drop: false")
+
+    ensure_dir(os.path.dirname(output_path) or ".")
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"Wrote patch template with {len(seen)} entries -> {output_path}")
+
+
+def cmd_recipe_export(args: argparse.Namespace) -> None:
+    applied = _applied_path(args.dir)
+    out_path = args.out or _recipe_path(args.dir)
+    entries: List[dict] = []
+    try:
+        with open(applied, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if rec.get("decision") != "applied":
+                    continue
+                if rec.get("module") not in {"cb", "opt", "loss"}:
+                    continue
+                payload = rec.get("payload") or {}
+                entry = {
+                    "at": {"step": rec.get("step", 0), "event": rec.get("event", "train_step_end")},
+                    "module": rec.get("module"),
+                    "op": rec.get("op"),
+                    "id": rec.get("id"),
+                }
+                # merge payload keys that map to op
+                for k in ("params", "target", "init", "enabled"):
+                    if k in payload:
+                        entry[k] = payload[k]
+                entries.append(entry)
+    except FileNotFoundError:
+        print(f"No applied ledger at {applied}")
+        return
+
+    ensure_dir(os.path.dirname(out_path))
+    with open(out_path, "w", encoding="utf-8") as f:
+        for rec in entries:
+            f.write(json.dumps(rec) + "\n")
+    print(f"Exported recipe with {len(entries)} entries -> {out_path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """
-    Build an argparse parser for the hotcb CLI.
-
-    Returns
-    -------
-    argparse.ArgumentParser
-        Parser with subcommands:
-          - init
-          - enable
-          - disable
-          - set
-          - load
-          - unload
-
-    Notes
-    -----
-    - The CLI is intentionally simple: it only appends commands to a JSONL file.
-    - The training process must run `HotController` with commands_path pointing
-      to this same JSONL file for the commands to be applied.
-    """
-    p = argparse.ArgumentParser(prog="hotcb", description="Hot callback controller CLI")
-    p.add_argument("--dir", default=".", help="Run directory containing hotcb.yaml and hotcb.commands.jsonl")
-
+    p = argparse.ArgumentParser(prog="hotcb", description="hotcb live training control plane")
+    p.add_argument("--dir", default=".", help="Run directory")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("init", help="Initialize hotcb.yaml and hotcb.commands.jsonl in --dir")
-    sp.set_defaults(func=cmd_init)
+    pi = sub.add_parser("init", help="Bootstrap run directory")
+    pi.set_defaults(func=cmd_init)
 
-    sp = sub.add_parser("enable", help="Enable a callback by id")
-    sp.add_argument("id")
-    sp.set_defaults(func=cmd_enable)
+    ps = sub.add_parser("status", help="Show run status")
+    ps.set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("disable", help="Disable a callback by id")
-    sp.add_argument("id")
-    sp.set_defaults(func=cmd_disable)
+    # Syntactic sugar commands (spec §15.4)
+    pen = sub.add_parser("enable", help="Enable a callback (sugar for cb enable)")
+    pen.add_argument("id")
+    pen.set_defaults(func=cmd_sugar_enable)
 
-    sp = sub.add_parser("set", help="Set callback params (key=value ...)")
-    sp.add_argument("id")
-    sp.add_argument("kv", nargs="+", help="key=value pairs")
-    sp.set_defaults(func=cmd_set)
+    pdis = sub.add_parser("disable", help="Disable a callback (sugar for cb disable)")
+    pdis.add_argument("id")
+    pdis.set_defaults(func=cmd_sugar_disable)
 
-    sp = sub.add_parser("load", help="Load a callback from a python file or module")
-    sp.add_argument("id")
-    src = sp.add_mutually_exclusive_group(required=True)
-    src.add_argument("--file", help="Path to a .py file to load")
-    src.add_argument("--module", help="Module path to import, e.g. mypkg.callbacks.foo")
-    sp.add_argument("--symbol", required=True, help="Class name inside file/module")
-    sp.add_argument("--enabled", action="store_true", help="Enable immediately after loading")
-    sp.add_argument("--init", nargs="*", default=[], help="Init kwargs key=value ...")
-    sp.set_defaults(func=cmd_load)
+    pset_sugar = sub.add_parser("set", help="Set params (auto-routes to opt or loss)")
+    pset_sugar.add_argument("--id", default="main")
+    pset_sugar.add_argument("kv", nargs="*")
+    pset_sugar.set_defaults(func=cmd_sugar_set)
 
-    sp = sub.add_parser("unload", help="Unload a callback instance (also disables)")
-    sp.add_argument("id")
-    sp.set_defaults(func=cmd_unload)
+    pf = sub.add_parser("freeze", help="Write freeze state file")
+    pf.add_argument("--mode", choices=["off", "prod", "replay", "replay_adjusted"], required=True)
+    pf.add_argument("--recipe", help="Recipe path for replay modes")
+    pf.add_argument("--adjust", help="Adjustment overlay path")
+    pf.add_argument("--policy", default="best_effort", choices=["best_effort", "strict"])
+    pf.add_argument("--step-offset", type=int, default=0)
+    pf.set_defaults(func=cmd_freeze)
+
+    pr = sub.add_parser("recipe", help="Recipe utilities")
+    sr = pr.add_subparsers(dest="recipe_cmd", required=True)
+    pre = sr.add_parser("export", help="Export recipe from applied ledger")
+    pre.add_argument("--out", help="Output path (default: runs/<dir>/hotcb.recipe.jsonl)")
+    pre.set_defaults(func=cmd_recipe_export)
+
+    prv = sr.add_parser("validate", help="Validate a recipe file")
+    prv.add_argument("--recipe", help="Recipe path to validate")
+    prv.set_defaults(func=cmd_recipe_validate)
+
+    p_pt = sr.add_parser("patch-template", help="Generate adjust.yaml template from recipe")
+    p_pt.add_argument("--recipe", default="hotcb.recipe.jsonl")
+    p_pt.add_argument("--output", default="hotcb.adjust.yaml")
+    p_pt.set_defaults(func=cmd_recipe_patch_template)
+
+    pcb = sub.add_parser("cb", help="Callback module commands")
+    pcb_sub = pcb.add_subparsers(dest="cb_command", required=True)
+    for name in ["enable", "disable", "unload"]:
+        ps = pcb_sub.add_parser(name)
+        ps.add_argument("id")
+        ps.set_defaults(func=cmd_cb)
+    pset = pcb_sub.add_parser("set_params")
+    pset.add_argument("id")
+    pset.add_argument("kv", nargs="*")
+    pset.set_defaults(func=cmd_cb)
+    pload = pcb_sub.add_parser("load")
+    pload.add_argument("id")
+    pload.add_argument("--file", help="Python file path", dest="file")
+    pload.add_argument("--path", help="Module path")
+    pload.add_argument("--symbol", required=True)
+    pload.add_argument("--enabled", action=argparse.BooleanOptionalAction, default=None)
+    pload.add_argument("--init", nargs="*", default=[])
+    pload.set_defaults(func=cmd_cb)
+
+    popt = sub.add_parser("opt", help="Optimizer control")
+    opt_sub = popt.add_subparsers(dest="opt_command", required=True)
+    for name in ["enable", "disable"]:
+        po = opt_sub.add_parser(name)
+        po.add_argument("--id", default="main")
+        po.set_defaults(func=cmd_opt)
+    pset_opt = opt_sub.add_parser("set_params")
+    pset_opt.add_argument("--id", default="main")
+    pset_opt.add_argument("kv", nargs="*")
+    pset_opt.set_defaults(func=cmd_opt)
+
+    ploss = sub.add_parser("loss", help="Loss control")
+    loss_sub = ploss.add_subparsers(dest="loss_command", required=True)
+    for name in ["enable", "disable"]:
+        pl = loss_sub.add_parser(name)
+        pl.add_argument("--id", default="main")
+        pl.set_defaults(func=cmd_loss)
+    pset_loss = loss_sub.add_parser("set_params")
+    pset_loss.add_argument("--id", default="main")
+    pset_loss.add_argument("kv", nargs="*")
+    pset_loss.set_defaults(func=cmd_loss)
 
     return p
 
 
-def main() -> None:
-    """
-    CLI entrypoint for `hotcb`.
-
-    This is registered in pyproject.toml:
-      [project.scripts]
-      hotcb = "hotcb.cli:main"
-
-    Example
-    -------
-    $ hotcb --help
-    $ hotcb --dir runs/exp1 init
-    """
-    p = build_parser()
-    args = p.parse_args()
+def main(argv: List[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     args.func(args)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

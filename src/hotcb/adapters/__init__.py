@@ -1,1 +1,1 @@
-# re-export adapters if you want
+# re-export adapters for convenience

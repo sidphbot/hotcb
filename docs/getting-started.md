@@ -8,22 +8,26 @@ pip install hotcb
 pip install "hotcb[yaml,lightning,hf]"
 ```
 
-Minimal Lightning usage
+## Minimal Lightning usage
+
 ```python
-from hotcb import HotController
-from hotcb.adapters.lightning import HotCallbackController
+from hotcb import HotKernel
+from hotcb.adapters.lightning import HotCBLightning
 import pytorch_lightning as pl
 
-controller = HotController(
-  config_path="runs/exp1/hotcb.yaml",
-  commands_path="runs/exp1/hotcb.commands.jsonl",
-  debounce_steps=5,
+kernel = HotKernel(
+    run_dir="runs/exp1",
+    debounce_steps=5,
 )
 
-trainer = pl.Trainer(callbacks=[HotCallbackController(controller)])
+trainer = pl.Trainer(callbacks=[HotCBLightning(kernel)])
 trainer.fit(model)
-Hot commands (from another terminal)
+```
+
+## Hot commands (from another terminal)
+
+```bash
 hotcb --dir runs/exp1 init
 hotcb --dir runs/exp1 enable timing
-hotcb --dir runs/exp1 set timing every=10 window=200
+hotcb --dir runs/exp1 cb set_params timing every=10 window=200
 ```

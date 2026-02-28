@@ -1,66 +1,88 @@
-# src/hotcb/ops.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from .protocol import CallbackTarget
+
+@dataclass
+class CallbackTarget:
+    kind: str
+    path: str
+    symbol: str
 
 
 @dataclass
-class Op:
+class HotOp:
     """
-    Internal operation type applied by `HotController`.
-
-    Instances of this dataclass represent a single mutation or instruction that
-    the controller applies to its callback registry. Ops may come from:
-      - desired-state config reconciliation (YAML), and/or
-      - append-only command stream (JSONL) written by the CLI.
-
-    Fields
-    ------
-    op:
-        Operation name. Supported values:
-          - "load":
-              Ensure a callback exists. If not loaded, instantiate it using
-              `target` + `init`. Can also set enabled state via `enabled`.
-          - "enable":
-              Mark callback enabled (it will receive events).
-          - "disable":
-              Mark callback disabled (it will not receive events).
-          - "set_params":
-              Hot-update parameters via callback.set_params(**params).
-          - "unload" (optional):
-              Disable callback and drop the instance from memory; if callback
-              implements close(), it will be called.
-
-    id:
-        Callback identifier. Must match callback's `id` argument during init.
-        The controller enforces id injection into init kwargs if absent.
-
-    params:
-        Used for "set_params". Dict of param names to values.
-        Values can be any JSON-serializable types when coming from CLI JSONL.
-        For YAML, values can be native YAML types.
-
-    target:
-        Used for "load". Points to the class location (file/module + symbol).
-
-    init:
-        Used for "load". Init kwargs used only when instantiating the callback.
-        If the callback already exists, init is stored but not re-applied.
-
-    enabled:
-        Used for "load". If provided, sets enabled state as part of load.
-
-    Example (JSONL command)
-    -----------------------
-    {"op":"set_params","id":"timing","params":{"every":10,"window":100}}
+    Normalized hotcb operation routed through HotKernel.
     """
 
+    module: str
     op: str
-    id: str
+    id: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     target: Optional[CallbackTarget] = None
     init: Optional[Dict[str, Any]] = None
     enabled: Optional[bool] = None
+    mode: Optional[str] = None
+    recipe_path: Optional[str] = None
+    adjust_path: Optional[str] = None
+    source: str = "external"
+    raw: Optional[dict] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a dict for debugging or ledger payload usage."""
+        out: Dict[str, Any] = {
+            "module": self.module,
+            "op": self.op,
+            "id": self.id,
+            "params": self.params,
+            "init": self.init,
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "recipe_path": self.recipe_path,
+            "adjust_path": self.adjust_path,
+            "source": self.source,
+        }
+        if self.target is not None:
+            out["target"] = {
+                "kind": self.target.kind,
+                "path": self.target.path,
+                "symbol": self.target.symbol,
+            }
+        return {k: v for k, v in out.items() if v is not None}
+
+
+def command_to_hotop(cmd: dict, default_module: str = "cb") -> HotOp:
+    """
+    Convert an external command record into HotOp.
+    """
+    module = str(cmd.get("module") or default_module)
+    op = str(cmd.get("op"))
+    cb_id = cmd.get("id")
+    params = cmd.get("params")
+    init = cmd.get("init")
+    enabled = cmd.get("enabled")
+    mode = cmd.get("mode")
+    target = None
+    if "target" in cmd and cmd.get("target") is not None:
+        t = cmd["target"]
+        target = CallbackTarget(kind=str(t["kind"]), path=str(t["path"]), symbol=str(t["symbol"]))
+
+    recipe_path = cmd.get("recipe_path")
+    adjust_path = cmd.get("adjust_path")
+
+    return HotOp(
+        module=module,
+        op=op,
+        id=str(cb_id) if cb_id is not None else None,
+        params=params,
+        init=init,
+        enabled=enabled,
+        target=target,
+        mode=mode,
+        recipe_path=recipe_path,
+        adjust_path=adjust_path,
+        raw=cmd,
+        source="external",
+    )

@@ -1,0 +1,36 @@
+# Sample adjustment overlay for replay_adjusted mode.
+# Demonstrates all 5 patch types.
+#
+# Usage:
+#   hotcb --dir runs/exp-001 freeze --mode replay_adjusted \
+#       --recipe hotcb.recipe.jsonl --adjust hotcb.adjust.yaml
+
+version: 1
+patches:
+  # 1. replace_params: change LR at step 1200
+  - match: {module: "opt", op: "set_params", at_step: 1200}
+    replace_params:
+      lr: 2e-5
+
+  # 2. shift_step: delay a callback enable by 50 steps
+  - match: {module: "cb", op: "enable", id: "feat_viz"}
+    shift_step: 50
+
+  # 3. drop: remove all feat_viz disable ops
+  - match: {module: "cb", op: "disable", id: "feat_viz"}
+    drop: true
+
+  # 4. insert: add a new action not in the original recipe
+  - insert:
+      at: {step: 1000, event: "train_step_end"}
+      module: "cb"
+      op: "enable"
+      id: "sys_monitor"
+
+  # 5. transform_params: scale all distill_w values by 1.1x
+  - match: {module: "loss", op: "set_params", id: "main"}
+    transform_params:
+      scale:
+        distill_w: 1.1
+      add:
+        depth_w: 0.5

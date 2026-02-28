@@ -1,52 +1,42 @@
-# hotcb 🔥  
-Hot-swappable callbacks for PyTorch Lightning, HuggingFace Trainer, or bare PyTorch.
+# hotcb
 
-Enable, disable, modify, or load new callbacks **while training is running** — without restarting.
+**Live Training Control Plane for PyTorch**
 
----
+hotcb lets you modify training behavior **while your run is active** — no restart, no lost progress. Every change is recorded, exportable, and replayable.
 
-## ✨ Features
-
-- ✅ Enable / disable callbacks live
-- ✅ Update callback parameters at runtime
-- ✅ Load callbacks from a new Python file path
-- ✅ Works with:
-  - PyTorch Lightning
-  - HuggingFace Trainer
-  - Bare PyTorch loops
-- ✅ No DDP required
-- ✅ CLI helper included
-- ✅ Minimal and framework-agnostic core
+Version 2.0 expands the original live-callback system into a full control plane: you can now swap callbacks, tune optimizer parameters, and adjust loss weights — all from another terminal while the model trains.
 
 ---
 
-## 📦 Installation
+## What you get
 
-Core only:
+| Module | What you can change live |
+|---|---|
+| **cb** | Load/unload/enable/disable/reconfigure callbacks |
+| **opt** | Learning rate, weight decay, gradient clipping, per-group |
+| **loss** | Loss weights, term toggles, ramp configs |
+
+Plus:
+
+- **Applied ledger** (`hotcb.applied.jsonl`): step-indexed, authoritative record of what actually happened
+- **Recipe export + replay**: export a run's changes as a portable plan, replay in future runs deterministically
+- **Freeze modes**: production lock, deterministic replay, replay-with-adjustments
+
+---
+
+## Installation
 
 ```bash
 pip install hotcb
 ```
 
-With YAML support:
+**With YAML config support:**
 
 ```bash
 pip install "hotcb[yaml]"
 ```
 
-With Lightning adapter:
-
-```bash
-pip install "hotcb[lightning]"
-```
-
-With HuggingFace adapter:
-
-```bash
-pip install "hotcb[hf]"
-```
-
-Install everything:
+**Full extras (YAML + Lightning + HuggingFace adapters):**
 
 ```bash
 pip install "hotcb[all]"
@@ -54,151 +44,216 @@ pip install "hotcb[all]"
 
 ---
 
-# 🚀 Quickstart (PyTorch Lightning)
+## Quickstart
 
-```python
-from hotcb import HotController
-from hotcb.adapters.lightning import HotCallbackController
-import lightning.pytorch as pl
+### 1. Initialize a run directory
 
-controller = HotController(
-    config_path="runs/exp1/hotcb.yaml",
-    commands_path="runs/exp1/hotcb.commands.jsonl",
-    debounce_steps=5,
-)
-
-trainer = pl.Trainer(
-    callbacks=[HotCallbackController(controller)],
-)
+```bash
+hotcb --dir runs/exp1 init
 ```
 
----
+### 2. Integrate into training
 
-# 🚀 Quickstart (HuggingFace Trainer)
+#### PyTorch Lightning
 
 ```python
-from hotcb import HotController
-from hotcb.adapters.hf import HotHFCallback
-from transformers import Trainer
+from hotcb import HotKernel
+from hotcb.adapters.lightning import HotCBLightning
 
-controller = HotController(
-    config_path="runs/exp1/hotcb.yaml",
-    commands_path="runs/exp1/hotcb.commands.jsonl",
-)
+kernel = HotKernel(run_dir="runs/exp1", debounce_steps=10)
 
-trainer = Trainer(
-    ...,
-    callbacks=[HotHFCallback(controller)],
-)
+trainer = pl.Trainer(callbacks=[HotCBLightning(kernel)])
+trainer.fit(model, datamodule=dm)
+trainer.fit(model, datamodule=dm)
 ```
 
----
-
-# 🚀 Quickstart (Bare PyTorch)
+#### HuggingFace Trainer
 
 ```python
-controller = HotController(
-    config_path="runs/exp1/hotcb.yaml",
-    commands_path="runs/exp1/hotcb.commands.jsonl",
-)
+from hotcb import HotKernel
+from hotcb.adapters.hf import HotCBHFCallback
 
-for step, batch in enumerate(loader):
-    # training logic...
-    controller.apply(
+kernel = HotKernel(run_dir="runs/exp1", debounce_steps=10)
+trainer = Trainer(..., callbacks=[HotCBHFCallback(kernel)])
+trainer.train()
+```
+
+#### Bare PyTorch
+
+```python
+from hotcb import HotKernel
+
+kernel = HotKernel(run_dir="runs/exp1", debounce_steps=10)
+
+for step, batch in enumerate(dl):
+    # ... forward, backward, optimizer step ...
+
+    kernel.apply(
         env={
-            "step": step,
+            "framework": "torch",
             "phase": "train",
-            "model": model,
+            "step": step,
+            "optimizer": optimizer,
+            "loss_state": model.loss_state,
             "log": print,
         },
         events=["train_step_end"],
     )
 ```
 
-# 🧭 CLI Control (Live, No Restart)
-
-`hotcb` includes a lightweight CLI to control callbacks while training is running.
-
-First, initialize a run directory:
+### 3. Control training live (from another terminal)
 
 ```bash
-hotcb --dir runs/exp1 init
-```
-
-This creates:
-
-```
-runs/exp1/
-  hotcb.yaml
-  hotcb.commands.jsonl
-```
-
----
-
-### 🔥 Load a callback from a new file
-
-```bash
-hotcb --dir runs/exp1 load feat_viz \
+# Load a diagnostic callback
+hotcb --dir runs/exp1 cb load feat_viz \
   --file /tmp/feat_viz.py \
   --symbol FeatureVizCallback \
-  --enabled \
-  --init every=100 out_dir=debug/features
-```
+  --enabled --init every=50
 
-It starts running immediately (at the next safe step).
+# Change learning rate
+hotcb --dir runs/exp1 opt set_params lr=1e-4 weight_decay=0.02
+
+# Change loss weights
+hotcb --dir runs/exp1 loss set_params distill_w=0.2 depth_w=1.5
+
+# Toggle a loss term off
+hotcb --dir runs/exp1 loss set_params terms.aux_depth=false
+```
 
 ---
 
-### ⚡ Enable / Disable instantly
+## Syntactic sugar
 
 ```bash
-hotcb --dir runs/exp1 enable feat_viz
-hotcb --dir runs/exp1 disable feat_viz
-```
+# enable/disable default to the cb module
+hotcb --dir runs/exp1 enable timing
+hotcb --dir runs/exp1 disable timing
 
-Disable = soft remove (no restart required).
+# set auto-routes based on key patterns
+hotcb --dir runs/exp1 set lr=5e-5          # → opt
+hotcb --dir runs/exp1 set distill_w=0.25   # → loss
+```
 
 ---
 
-### 🎛 Adjust parameters live
+## Run artifacts
+
+| File | Purpose |
+|---|---|
+| `hotcb.commands.jsonl` | What you asked for (incoming commands) |
+| `hotcb.applied.jsonl` | What actually happened (step-indexed, authoritative) |
+| `hotcb.recipe.jsonl` | Portable replay plan exported from the ledger |
+| `hotcb.sources/` | Captured callback source files for deterministic replay |
+| `hotcb.freeze.json` | Current freeze mode state |
+
+---
+
+## Freeze modes
+
+| Mode | Behavior |
+|---|---|
+| `off` | Normal — all live commands accepted |
+| `prod` | Ignore all external commands (production lock) |
+| `replay` | Ignore external commands, replay recipe deterministically |
+| `replay_adjusted` | Replay recipe with YAML overlay patches |
 
 ```bash
-hotcb --dir runs/exp1 set feat_viz every=25
-hotcb --dir runs/exp1 set feat_viz threshold=30.5 prefix=[debug]
-```
+# Lock a production run
+hotcb --dir runs/exp1 freeze --mode prod
 
-Changes are applied at the next safe point.
+# Replay a previous run exactly
+hotcb --dir runs/exp1 recipe export --out runs/exp1/hotcb.recipe.jsonl
+hotcb --dir runs/exp2 freeze --mode replay --recipe runs/exp1/hotcb.recipe.jsonl
+
+# Replay with adjustments
+hotcb --dir runs/exp2 freeze --mode replay_adjusted \
+  --recipe runs/exp1/hotcb.recipe.jsonl \
+  --adjust runs/exp2/hotcb.adjust.yaml
+
+# Unlock
+hotcb --dir runs/exp1 freeze --mode off
+```
 
 ---
 
-### 🧹 Unload completely (optional)
+## Exposing optimizer and loss state
+
+hotcb never monkeypatches the trainer. It mutates only what you pass via `env`.
+
+### Optimizer
+
+Pass `env["optimizer"]` (or `env["resolve_optimizer"]` as a callable). The Lightning and HF adapters handle this automatically.
+
+### Loss state
+
+Keep a mutable dict on your model:
+
+```python
+self.loss_state = {
+    "weights": {"distill": 0.2, "depth": 1.5},
+    "terms":   {"aux_depth": True, "aux_heatmap": False},
+    "ramps":   {"depth": {"type": "linear", "warmup_frac": 0.2, "end": 2.0}},
+}
+```
+
+Set `env["loss_state"] = self.loss_state` — the adapters do this automatically if the attribute exists on your LightningModule or HF model.
+
+---
+
+## Deterministic callback replay
+
+When you load a callback from a Python file, hotcb captures its source:
 
 ```bash
-hotcb --dir runs/exp1 unload feat_viz
+hotcb --dir runs/exp1 cb load feat_viz \
+  --file /tmp/feat_viz.py --symbol FeatureVizCallback
 ```
 
-This disables and drops the instance.
+hotcb computes SHA-256, copies the file to `hotcb.sources/`, and records the version in the ledger. Replay mode uses the captured version — even if the original file has since changed.
 
 ---
 
-### 💡 Typical Workflow
+## Status and inspection
 
-1. Start training once.
-2. Notice something odd.
-3. Drop a new `.py` diagnostic file.
-4. `hotcb load ...`
-5. Inspect.
-6. `hotcb disable ...`
-7. Continue training uninterrupted.
+```bash
+# Show current freeze mode and recent applied entries
+hotcb --dir runs/exp1 status
 
-No restarts. No trainer hacks. No killing long runs.
+# Validate a recipe file
+hotcb --dir runs/exp1 recipe validate --recipe runs/exp1/hotcb.recipe.jsonl
 
+# Inspect the ledger directly
+tail -n 20 runs/exp1/hotcb.applied.jsonl
+```
 
 ---
 
-# 🧠 Writing a Hot Callback
+## Included diagnostic callbacks
 
-Minimal contract:
+hotcb ships with ready-to-use callbacks:
+
+| Callback | What it does |
+|---|---|
+| `HeartbeatCallback` | Periodic "I'm alive" log signal |
+| `TimingCallback` | Step timing and throughput |
+| `SystemStatsCallback` | CPU / RAM / GPU utilization |
+| `TensorStatsCallback` | Tensor mean / std / min / max |
+| `GradStatsCallback` | Gradient norm and stability |
+| `AnomalyGuardCallback` | NaN/Inf detection with auto-disable |
+| `JSONLLoggerCallback` | Structured append-only JSONL metrics log |
+
+```bash
+hotcb --dir runs/exp1 cb load heartbeat \
+  --path hotcb.modules.cb.callbacks.heartbeat \
+  --symbol HeartbeatCallback \
+  --enabled --init every=100
+```
+
+---
+
+## Writing a hot callback
+
+Minimal contract — no base class required:
 
 ```python
 class MyCallback:
@@ -216,304 +271,29 @@ class MyCallback:
             env.get("log", print)(f"[{self.id}] step={step}")
 ```
 
-That’s it.
+---
+
+## Safety
+
+- No training loop mutation — hotcb never touches the trainer internals
+- Safe-point updates only — changes applied at batch/step boundaries
+- Fail-safe — crashing callbacks and modules auto-disable, training continues
+- Full audit trail — every mutation written to the applied ledger
 
 ---
 
-### 📚 See Real Examples
+## Docs
 
-For more complete examples (including file-based hot loading and artifact writing), check:
-
-- `examples/callbacks/print_metrics.py` — minimal logging callback  
-- `examples/callbacks/feat_viz.py` — writes step-based artifacts to disk  
-- `examples/lightning_train.py` — Lightning integration example  
-- `examples/hf_train.py` — HuggingFace Trainer integration example  
-
-These examples are fully runnable and demonstrate live parameter updates via the CLI.
-
----
+- [Concepts](docs/concepts.md) — HotKernel, ops, ledger, recipe, freeze modes
+- [CLI Reference](docs/cli.md) — all commands and sugar rules
+- [Replay](docs/replay.md) — recipe export, replay modes, overlays
+- [Formats](docs/formats.md) — JSONL, JSON, and YAML schemas
+- Modules: [cb](docs/modules/cb.md) | [opt](docs/modules/hotopt.md) | [loss](docs/modules/hotloss.md)
+- Examples: [Lightning](docs/examples/lightning_example.py) | [HF](docs/examples/hf_example.py) | [Bare PyTorch](docs/examples/bare_torch_example.py) | [Custom callback](docs/examples/custom_callback_example.py) | [Adjust overlay](docs/examples/adjust_overlay.yaml)
+- [CLI Walkthrough](docs/examples/cli_walkthrough.md) — full live-control session from init to replay
 
 ---
 
-# 🧰 Included Diagnostic Callbacks
-
-`hotcb` includes a lightweight built-in diagnostics pack so you can start instrumenting runs immediately:
-
-- **HeartbeatCallback** — periodic “I’m alive” signal for long runs  
-- **TimingCallback** — step timing & throughput tracking  
-- **SystemStatsCallback** — CPU / RAM / (optional) GPU utilization  
-- **TensorStatsCallback** — tensor mean/std/min/max tracking  
-- **GradStatsCallback** — gradient norm & stability diagnostics  
-- **AnomalyGuardCallback** — basic NaN / Inf detection & auto-disable protection  
-- **JSONLLoggerCallback** — structured append-only JSONL event logging  
-
-These are intentionally minimal, composable, and safe to enable/disable at runtime.
-
-Example:
-
-```bash
-hotcb --dir runs/exp1 load heartbeat \
-  --module hotcb.callbacks.heartbeat \
-  --symbol HeartbeatCallback \
-  --enabled \
-  --init every=100
-```
-
-Or enable a gradient monitor mid-training:
-
-```bash
-hotcb --dir runs/exp1 load grad_stats \
-  --module hotcb.callbacks.grad_stats \
-  --symbol GradStatsCallback \
-  --enabled \
-  --init every=50
-```
-
-All included callbacks support live parameter updates:
-
-```bash
-hotcb --dir runs/exp1 set grad_stats every=10
-```
-
-No restart required.
-
----
-
-# 🔎 Intelligent Logging Resolvers
-
-hotcb callbacks run inside the same Python process as your training loop.
-That means they can often discover and reuse the logging infrastructure already configured by your framework (Lightning, HuggingFace Trainer, or custom code).
-
-To support this cleanly and safely, hotcb provides logging resolvers — utilities that attempt to discover common logging backends from the runtime env passed to callbacks.
-
-### Individual resolvers - For Scalars, Images, Histograms etc 
-
-Resolvers allow a callback to “plug into” existing logging backends automatically.
-
-- Discover logger candidates (no strict contract required) - Resolvers inspect the env dictionary and attempt to extract logger-like objects from common locations (No adapter-level constraints are imposed. This is purely best-effort introspection.)
-
-- Or, Resolve specific backends (official + heuristic detection) - Resolvers find Known official classes (when installed) + Safe attribute-based heuristics
-
-|Supported backends| resolver function                 | Returns              |
-|------------------|-----------------------------------|----------------------|
-|Tensorboard| `resolve_tensorboard_writer(env)` | `writer`             |
-|MLFlow| `resolve_mlflow(env)`             | `experiment, run_id` |
-|Comet| `resolve_comet_experiment(env)`   | `experiment`         |
-
-Typical sources:
-
-- Lightning TensorBoardLogger, MLFlowLogger or CometLogger
-- HF TensorBoardCallback, MLflowCallback or CometCallback (best effort)
-- Direct SummaryWriter or (client, run_id) tuple passed in `env["mlflow"]` or object passed in `env["comet_experiment"]`
-
-### Holistic logging Convenience Helper - For Scalars only
-
-A unified helper is also provided:
-```
-log_scalar(env, key, value, step=None)
-```
-Behavior:
-
-- Try TensorBoard (add_scalar)
-- Try MLflow (log_metric)
-- Try Comet (log_metric)
-
-Returns `True` if logging succeeded to at least one backend.
-
-Failures are swallowed — logging will never crash your training loop.
-
-Use framework-native logging for training-critical metrics.  
-Use hotcb resolvers for live instrumentation, debugging, and temporary analytics.
-
----
-
-# 🔌 Import Scope in Hot-Loaded Callbacks
-
-Callbacks run in the same interpreter as your training job.
-
-You can import from your training repo if:
-- You run from repo root, or
-- The project is installed (editable or normal), or
-- PYTHONPATH is configured.
-
-Prefer absolute imports in hot-loaded `.py` files.
-
----
-
-
-# 🧬 A Unified Callback Model
-
-`hotcb` is a thin portability layer: it lets you write one callback once, then run it across
-PyTorch Lightning, HuggingFace Trainer, or bare PyTorch by mapping framework hook arguments into a
-small, normalized `env` dictionary.
-
-`env` is intentionally small and predictable. Adapters fill it from the native framework objects:
-
-| `env` key | Lightning (source) | HF Trainer (source) | Bare PyTorch (source) |
-|---|---|---|---|
-| `env["step"]` | `trainer.global_step` | `state.global_step` | loop `step` |
-| `env["epoch"]` | `trainer.current_epoch` | `state.epoch` | loop `epoch` |
-| `env["phase"]` | adapter sets `"train"/"val"` | adapter sets `"train"/"eval"` | you set it |
-| `env["model"]` | `pl_module` | *(adapter-provided)* | your model |
-| `env["batch"]` | `batch` | *(adapter-provided)* | your batch |
-| `env["outputs"]` | `outputs` | *(optional)* | your outputs |
-| `env["log"]` | adapter wraps `trainer.print` | adapter wraps `print` | your logger |
-
-> `env` is a portability contract. If you want extra fields, you can always include them in `env`
-> from your own loop, or extend adapters later — but the minimal set above keeps callbacks simple
-> and avoids accidental retention of large tensors.
-
-
----
-
-# 🛠 Making existing callbacks Hot-Adjustable
-
-All four variants below do the same thing:
-- print once every `every` steps
-- easy to tune `every`
-- the hotcb version supports runtime updates via the CLI (`hotcb set ...`)
-
-### 1) PyTorch Lightning callback
-
-```python
-import lightning.pytorch as pl
-
-class PrintEveryN_Lightning(pl.Callback):
-    def __init__(self, every: int = 50, prefix: str = "[metrics]"):
-        self.every = int(every)
-        self.prefix = str(prefix)
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        step = int(trainer.global_step)
-        if self.every > 0 and (step % self.every) == 0:
-            trainer.print(f"{self.prefix} step={step} batch_idx={batch_idx}")
-```
-
-### 2) HuggingFace Trainer callback
-
-```python
-from transformers import TrainerCallback
-
-class PrintEveryN_HF(TrainerCallback):
-    def __init__(self, every: int = 50, prefix: str = "[metrics]"):
-        self.every = int(every)
-        self.prefix = str(prefix)
-
-    def on_step_end(self, args, state, control, **kwargs):
-        step = int(state.global_step)
-        if self.every > 0 and (step % self.every) == 0:
-            print(f"{self.prefix} step={step}")
-        return control
-```
-
-### 3) Bare PyTorch “hook style”
-
-```python
-class PrintEveryN_TorchHook:
-    def __init__(self, every: int = 50, prefix: str = "[metrics]"):
-        self.every = int(every)
-        self.prefix = str(prefix)
-
-    def on_step_end(self, step: int, batch_idx: int):
-        if self.every > 0 and (step % self.every) == 0:
-            print(f"{self.prefix} step={step} batch_idx={batch_idx}")
-```
-
-Usage:
-
-```python
-hook = PrintEveryN_TorchHook(every=50)
-
-for step, batch in enumerate(loader):
-    # forward/backward/step...
-    hook.on_step_end(step=step, batch_idx=step)
-```
-
-### 4) hotcb callback (portable + hot-adjustable)
-
-```python
-class PrintEveryN_HotCB:
-    def __init__(self, id: str, every: int = 50, prefix: str = "[metrics]"):
-        self.id = id
-        self.every = int(every)
-        self.prefix = str(prefix)
-
-    def set_params(self, **kwargs):
-        if "every" in kwargs:
-            self.every = int(kwargs["every"])
-        if "prefix" in kwargs:
-            self.prefix = str(kwargs["prefix"])
-
-    def handle(self, event: str, env: dict):
-        step = int(env.get("step", 0))
-        batch_idx = env.get("batch_idx", None)
-        log = env.get("log", print)
-
-        if self.every > 0 and (step % self.every) == 0:
-            log(f"{self.prefix} id={self.id} step={step} event={event} batch_idx={batch_idx}")
-```
-
-Runtime tuning (no restart):
-
-```bash
-hotcb --dir runs/exp1 set print_metrics every=5
-```
-
----
-
-# 📡 How It Works
-
-Two control layers:
-
-1. `hotcb.yaml` — desired state (optional)
-2. `hotcb.commands.jsonl` — append-only command stream
-
-Changes are applied at safe adapter-defined boundaries:
-- Lightning → end of batch
-- HF → end of step / eval
-- Bare torch → wherever you call `apply()`
-
----
-
-# ❓ Why this exists
-
-Hot-swappable callbacks are often used for:
-
-- Temporary diagnostics
-- Feature visualization 
-- Gradient/statistics inspection
-- Mid-run debugging
-- Experiment instrumentation
-
-You don’t want to:
-
-- Modify your Trainer code
-- Restart a long training job
-
-The in-built hot-reloaders and logging resolvers allow a callback to “plug into” existing training run and logging backends automatically. 
-
-Safely - without impacting your run even when it fails.
-
----
-
-# 🛡 Safety
-
-- No training loop mutation
-- No framework internals modified
-- Fail-safe: crashing callbacks can auto-disable
-- “Remove” = disable (optional unload supported)
-
----
-
-# 🌱 Philosophy
-
-Training shouldn’t require restarts for diagnostics.
-
-`hotcb` treats debugging and visualization as live instrumentation — not static configuration.
-
----
-
-# 📄 License
+## License
 
 MIT License (see LICENSE file).
-
