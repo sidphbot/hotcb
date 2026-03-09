@@ -14,6 +14,11 @@ runs/<run_id>/
   hotcb.adjust.yaml            # adjustment overlay for replay_adjusted (optional)
   hotcb.sources/               # captured source files for python_file loads
   hotcb.log                    # kernel log sink (optional)
+  hotcb.tune.recipe.yaml       # tune recipe (optional, for hottune)
+  hotcb.tune.mutations.jsonl   # tune mutation log (written by hottune)
+  hotcb.tune.segments.jsonl    # tune evaluation segments (written by hottune)
+  hotcb.tune.summary.json      # tune run summary (written at run end)
+  hotcb.tune.study.sqlite      # optuna study state (optional)
 ```
 
 ## `hotcb.commands.jsonl`

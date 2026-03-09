@@ -23,7 +23,8 @@ dependencies = []  # keep core minimal
 yaml = ["pyyaml>=6.0"]
 lightning = ["lightning>=2.0"]
 hf = ["transformers>=4.30"]
-all = ["pyyaml>=6.0", "lightning>=2.0", "transformers>=4.30"]
+tune = ["optuna>=3.0", "pyyaml>=6.0"]
+all = ["pyyaml>=6.0", "lightning>=2.0", "transformers>=4.30", "optuna>=3.0"]
 docs = [
   "mkdocs",
   "mkdocs-material",

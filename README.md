@@ -15,6 +15,7 @@ Version 2.0 expands the original live-callback system into a full control plane:
 | **cb** | Load/unload/enable/disable/reconfigure callbacks |
 | **opt** | Learning rate, weight decay, gradient clipping, per-group |
 | **loss** | Loss weights, term toggles, ramp configs |
+| **tune** | Online constrained hyperparameter adaptation (optional, `hotcb[tune]`) |
 
 Plus:
 
@@ -40,6 +41,12 @@ pip install "hotcb[yaml]"
 
 ```bash
 pip install "hotcb[all]"
+```
+
+**With online tuning (Bayesian HPO):**
+
+```bash
+pip install "hotcb[tune]"
 ```
 
 ---
@@ -136,6 +143,22 @@ hotcb --dir runs/exp1 set distill_w=0.25   # → loss
 
 ---
 
+### 4. Enable online tuning (optional)
+
+```bash
+# Register actuators in your training script (see docs/modules/hottune.md)
+# Then enable from another terminal:
+hotcb --dir runs/exp1 tune enable --mode active
+
+# Or observe-only (no mutations, just proposals):
+hotcb --dir runs/exp1 tune enable --mode observe
+
+# Check tune status:
+hotcb --dir runs/exp1 tune status
+```
+
+---
+
 ## Run artifacts
 
 | File | Purpose |
@@ -145,6 +168,9 @@ hotcb --dir runs/exp1 set distill_w=0.25   # → loss
 | `hotcb.recipe.jsonl` | Portable replay plan exported from the ledger |
 | `hotcb.sources/` | Captured callback source files for deterministic replay |
 | `hotcb.freeze.json` | Current freeze mode state |
+| `hotcb.tune.mutations.jsonl` | Tune mutation log (if tune enabled) |
+| `hotcb.tune.segments.jsonl` | Tune evaluation segments (if tune enabled) |
+| `hotcb.tune.summary.json` | Tune run summary (if tune enabled) |
 
 ---
 
@@ -288,7 +314,7 @@ class MyCallback:
 - [CLI Reference](docs/cli.md) — all commands and sugar rules
 - [Replay](docs/replay.md) — recipe export, replay modes, overlays
 - [Formats](docs/formats.md) — JSONL, JSON, and YAML schemas
-- Modules: [cb](docs/modules/cb.md) | [opt](docs/modules/hotopt.md) | [loss](docs/modules/hotloss.md)
+- Modules: [cb](docs/modules/cb.md) | [opt](docs/modules/hotopt.md) | [loss](docs/modules/hotloss.md) | [tune](docs/modules/hottune.md)
 - Examples: [Lightning](docs/examples/lightning_example.py) | [HF](docs/examples/hf_example.py) | [Bare PyTorch](docs/examples/bare_torch_example.py) | [Custom callback](docs/examples/custom_callback_example.py) | [Adjust overlay](docs/examples/adjust_overlay.yaml)
 - [CLI Walkthrough](docs/examples/cli_walkthrough.md) — full live-control session from init to replay
 

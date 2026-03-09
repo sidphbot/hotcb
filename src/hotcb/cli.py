@@ -216,6 +216,65 @@ def cmd_sugar_set(args: argparse.Namespace) -> None:
     print(f"queued {module} set_params for {args.id}")
 
 
+def cmd_tune(args: argparse.Namespace) -> None:
+    op = args.tune_command
+    obj: Dict[str, Any] = {"module": "tune", "op": op}
+    if op == "enable":
+        mode = getattr(args, "mode", "active")
+        obj["params"] = {"mode": mode}
+    elif op == "set":
+        obj["op"] = "set"
+        obj["params"] = _parse_kv(args.kv or [])
+    _append_command(args.dir, obj)
+    print(f"queued tune {op}")
+
+
+def cmd_tune_status(args: argparse.Namespace) -> None:
+    run_dir = args.dir
+    recipe_path = os.path.join(run_dir, "hotcb.tune.recipe.yaml")
+    summary_path = os.path.join(run_dir, "hotcb.tune.summary.json")
+
+    if os.path.exists(recipe_path):
+        print(f"Tune recipe: {recipe_path}")
+    else:
+        print("No tune recipe found.")
+
+    if os.path.exists(summary_path):
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            print(f"Mode: {summary.get('mode', '?')}")
+            print(f"Mutations: {summary.get('total_mutations', 0)} total, {summary.get('applied_mutations', 0)} applied")
+            print(f"Accept rate: {summary.get('accept_rate', 0):.1%}")
+            segs = summary.get("segments_by_decision", {})
+            for d, c in segs.items():
+                print(f"  {d}: {c}")
+        except Exception:
+            print("Failed to read tune summary.")
+    else:
+        print("No tune summary found.")
+
+
+def cmd_tune_export_recipe(args: argparse.Namespace) -> None:
+    run_dir = args.dir
+    out = args.out or os.path.join(run_dir, "hotcb.tune.recipe.yaml")
+    summary_path = os.path.join(run_dir, "hotcb.tune.summary.json")
+    if not os.path.exists(summary_path):
+        print(f"No tune summary at {summary_path}")
+        raise SystemExit(1)
+    # Just copy the summary as a starting point
+    try:
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        ensure_dir(os.path.dirname(out) or ".")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        print(f"Exported tune summary -> {out}")
+    except Exception as e:
+        print(f"Failed: {e}")
+        raise SystemExit(1)
+
+
 def cmd_recipe_validate(args: argparse.Namespace) -> None:
     """Validate a recipe file for schema correctness."""
     path = args.recipe or _recipe_path(args.dir)
@@ -241,7 +300,7 @@ def cmd_recipe_validate(args: argparse.Namespace) -> None:
             at = rec.get("at", {})
             if not isinstance(at, dict) or "step" not in at:
                 errors.append(f"  line {i}: 'at' must contain 'step'")
-            if rec.get("module") not in {"cb", "opt", "loss"}:
+            if rec.get("module") not in {"cb", "opt", "loss", "tune"}:
                 errors.append(f"  line {i}: module must be cb/opt/loss, got '{rec.get('module')}'")
     if errors:
         print(f"Recipe {path}: {len(errors)} errors in {entries} entries:")
@@ -422,6 +481,22 @@ def build_parser() -> argparse.ArgumentParser:
     pset_loss.add_argument("--id", default="main")
     pset_loss.add_argument("kv", nargs="*")
     pset_loss.set_defaults(func=cmd_loss)
+
+    ptune = sub.add_parser("tune", help="Tune module control")
+    tune_sub = ptune.add_subparsers(dest="tune_command", required=True)
+    pt_enable = tune_sub.add_parser("enable", help="Enable tuning")
+    pt_enable.add_argument("--mode", default="active", choices=["active", "observe", "suggest"])
+    pt_enable.set_defaults(func=cmd_tune)
+    pt_disable = tune_sub.add_parser("disable", help="Disable tuning")
+    pt_disable.set_defaults(func=cmd_tune)
+    pt_status = tune_sub.add_parser("status", help="Show tune status")
+    pt_status.set_defaults(func=cmd_tune_status)
+    pt_set = tune_sub.add_parser("set", help="Set tune recipe params")
+    pt_set.add_argument("kv", nargs="*")
+    pt_set.set_defaults(func=cmd_tune)
+    pt_export = tune_sub.add_parser("export-recipe", help="Export tune recipe")
+    pt_export.add_argument("--out", help="Output path")
+    pt_export.set_defaults(func=cmd_tune_export_recipe)
 
     return p
 

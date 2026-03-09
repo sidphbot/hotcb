@@ -89,4 +89,13 @@ def load_yaml(path: str) -> List[HotOp]:
             params = loss_cfg.get("params") or {}
             ops.append(HotOp(module="loss", op="set_params", id=loss_id, params=params, source="yaml"))
 
+    tune_cfg = data.get("tune") or {}
+    if tune_cfg:
+        tune_enabled = tune_cfg.get("enabled", False)
+        if tune_enabled:
+            mode = tune_cfg.get("mode", "active")
+            ops.append(HotOp(module="tune", op="enable", params={"mode": mode}, source="yaml"))
+        else:
+            ops.append(HotOp(module="tune", op="disable", source="yaml"))
+
     return ops

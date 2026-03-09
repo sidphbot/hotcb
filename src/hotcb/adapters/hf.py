@@ -41,7 +41,13 @@ class HotCBHFCallback(TrainerCallback):
 
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics=None, **kwargs: Any):
         env = self._env(args, state, control, phase="eval", metrics=metrics, **kwargs)
-        self.kernel.apply(env, events=self.eval_events)
+        self.kernel.apply(env, events=self.eval_events + ["val_epoch_end"])
+        return control
+
+    def on_train_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any):
+        env = self._env(args, state, control, phase="train_end", **kwargs)
+        self.kernel.apply(env, events=["run_end"])
+        self.kernel.close(env)
         return control
 
     def _env(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, phase: str, **extra: Any) -> Dict[str, Any]:
@@ -58,6 +64,44 @@ class HotCBHFCallback(TrainerCallback):
             "control": control,
             "log": _log,
         }
+
+        env["kernel"] = self.kernel
+
+        # Metric accessor for hottune
+        eval_metrics = extra.get("metrics") or {}
+
+        def _metric(name: str, default: Any = None) -> Any:
+            # Check eval metrics passed to on_evaluate
+            if name in eval_metrics:
+                return eval_metrics[name]
+            # Check state log history
+            if state.log_history:
+                for entry in reversed(state.log_history):
+                    if name in entry:
+                        return entry[name]
+            # Normalized env fields
+            if name == "lr":
+                opt = env.get("optimizer")
+                if opt is not None:
+                    try:
+                        return opt.param_groups[0]["lr"]
+                    except Exception:
+                        pass
+            if name in ("train/loss", "loss"):
+                if state.log_history:
+                    for entry in reversed(state.log_history):
+                        if "loss" in entry:
+                            return entry["loss"]
+            return default
+
+        env["metric"] = _metric
+
+        # Expose max_steps for phase binning
+        try:
+            if hasattr(args, "max_steps") and args.max_steps and args.max_steps > 0:
+                env["max_steps"] = args.max_steps
+        except Exception:
+            pass
 
         # Expose optimizer for hotopt
         if self._resolve_optimizer is not None:

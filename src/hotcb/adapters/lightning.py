@@ -55,6 +55,19 @@ class HotCBLightning(pl.Callback):
         env = self._env(trainer, pl_module, phase="val", outputs=outputs, batch=batch, batch_idx=batch_idx, dataloader_idx=dataloader_idx)
         self.kernel.apply(env, events=self.val_events)
 
+    def on_validation_epoch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        env = self._env(trainer, pl_module, phase="val")
+        self.kernel.apply(env, events=["val_epoch_end"])
+
+    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        env = self._env(trainer, pl_module, phase="fit_end")
+        self.kernel.apply(env, events=["run_end"])
+        self.kernel.close(env)
+
     def _env(self, trainer: pl.Trainer, pl_module: pl.LightningModule, phase: str, **extra: Any) -> Dict[str, Any]:
         def _log(s: str) -> None:
             try:
@@ -71,6 +84,69 @@ class HotCBLightning(pl.Callback):
             "trainer": trainer,
             "log": _log,
         }
+
+        env["kernel"] = self.kernel
+
+        # Metric accessor for hottune
+        def _metric(name: str, default: Any = None) -> Any:
+            # Check callback metrics first
+            try:
+                cb_metrics = trainer.callback_metrics
+                if name in cb_metrics:
+                    val = cb_metrics[name]
+                    try:
+                        import torch
+                        if isinstance(val, torch.Tensor):
+                            return val.item()
+                    except ImportError:
+                        pass
+                    return val
+            except Exception:
+                pass
+            # Check logged metrics
+            try:
+                logged = trainer.logged_metrics
+                if name in logged:
+                    val = logged[name]
+                    try:
+                        import torch
+                        if isinstance(val, torch.Tensor):
+                            return val.item()
+                    except ImportError:
+                        pass
+                    return val
+            except Exception:
+                pass
+            # Normalized env fields
+            if name == "lr":
+                opt = env.get("optimizer")
+                if opt is not None:
+                    try:
+                        return opt.param_groups[0]["lr"]
+                    except Exception:
+                        pass
+            if name in ("train/loss", "loss"):
+                loss = env.get("loss")
+                if loss is not None:
+                    try:
+                        import torch
+                        if isinstance(loss, torch.Tensor):
+                            return loss.item()
+                    except ImportError:
+                        pass
+                    return loss
+            return default
+
+        env["metric"] = _metric
+
+        # Expose max_steps for phase binning
+        try:
+            if hasattr(trainer, "max_steps") and trainer.max_steps and trainer.max_steps > 0:
+                env["max_steps"] = trainer.max_steps
+            elif hasattr(trainer, "estimated_stepping_batches"):
+                env["max_steps"] = int(trainer.estimated_stepping_batches)
+        except Exception:
+            pass
 
         # Expose optimizer for hotopt
         try:

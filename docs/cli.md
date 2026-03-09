@@ -239,6 +239,50 @@ patches:
     # drop: false
 ```
 
+## Tune Commands (`hotcb tune`)
+
+### `hotcb tune enable [--mode <mode>]`
+
+Enable online tuning. Modes: `active` (default), `observe`, `suggest`.
+
+```bash
+hotcb --dir runs/exp-001 tune enable
+hotcb --dir runs/exp-001 tune enable --mode observe
+```
+
+### `hotcb tune disable`
+
+Disable tuning.
+
+```bash
+hotcb --dir runs/exp-001 tune disable
+```
+
+### `hotcb tune status`
+
+Show tune summary: recipe presence, mutation count, accept rate.
+
+```bash
+hotcb --dir runs/exp-001 tune status
+```
+
+### `hotcb tune set k=v ...`
+
+Override tune recipe parameters using dotted paths.
+
+```bash
+hotcb --dir runs/exp-001 tune set acceptance.epsilon=0.002
+hotcb --dir runs/exp-001 tune set safety.max_global_reject_streak=5
+```
+
+### `hotcb tune export-recipe [--out <path>]`
+
+Export the tune run summary.
+
+```bash
+hotcb --dir runs/exp-001 tune export-recipe --out evolved_summary.json
+```
+
 ## Syntactic Sugar
 
 Shortcut commands that auto-route to the right module.

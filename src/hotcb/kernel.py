@@ -10,8 +10,9 @@ from .ledger import append_ledger
 from .ops import HotOp, command_to_hotop
 from .recipe import RecipePlayer
 from .util import FileCursor, read_new_jsonl, safe_mtime
-from .modules import CallbackModule, HotOptController, HotLossController
+from .modules import CallbackModule, HotOptController, HotLossController, HotTuneController
 from .modules.result import ModuleResult
+from .actuators.base import BaseActuator
 from . import config as hotcb_config
 
 
@@ -32,6 +33,7 @@ class HotKernel:
         freeze_path: Optional[str] = None,
         yaml_path: Optional[str] = None,
         log_path: Optional[str] = None,
+        tune_recipe_path: Optional[str] = None,
     ) -> None:
         self.run_dir = run_dir
         self.debounce_steps = max(1, int(debounce_steps))
@@ -57,10 +59,17 @@ class HotKernel:
         self._yaml_mtime: float = 0.0
         self._cmd_cursor = FileCursor(path=self.commands_path, offset=0)
 
+        self._actuators: Dict[str, BaseActuator] = {}
+
         self.modules: Dict[str, object] = {
             "cb": CallbackModule(auto_disable_on_error=auto_disable_on_error, log_path=self.log_path, source_capture_dir=self.sources_dir),
             "opt": HotOptController(auto_disable_on_error=auto_disable_on_error),
             "loss": HotLossController(auto_disable_on_error=auto_disable_on_error),
+            "tune": HotTuneController(
+                auto_disable_on_error=auto_disable_on_error,
+                run_dir=run_dir,
+                recipe_path=tune_recipe_path,
+            ),
         }
 
         self._seq = self._seed_seq(self.applied_path)
@@ -74,6 +83,18 @@ class HotKernel:
             return count
         except Exception:
             return 0
+
+    def register_actuator(self, name: str, actuator: BaseActuator) -> None:
+        self._actuators[name] = actuator
+        tune = self.modules.get("tune")
+        if tune is not None and hasattr(tune, "register_actuator"):
+            tune.register_actuator(name, actuator)
+
+    def get_actuator(self, name: str) -> Optional[BaseActuator]:
+        return self._actuators.get(name)
+
+    def list_actuators(self) -> Dict[str, BaseActuator]:
+        return dict(self._actuators)
 
     def _should_poll(self) -> bool:
         if self.poll_interval_sec > 0.0:
@@ -134,15 +155,32 @@ class HotKernel:
         for op, ev in pending:
             self._apply_single(op, env, event=ev, step=current_step)
 
-        # dispatch events (callbacks module only)
+        # dispatch events (callbacks module)
         cb = self.modules.get("cb")
         if cb is not None and hasattr(cb, "dispatch_events"):
             cb.dispatch_events(events, env)
+
+        # dispatch events to tune module
+        tune = self.modules.get("tune")
+        if tune is not None and hasattr(tune, "on_event"):
+            for ev in events:
+                try:
+                    tune.on_event(ev, env)
+                except Exception:
+                    pass  # defensive — never crash training
 
     def close(self, env: Optional[Dict[str, object]] = None) -> None:
         """
         Finalize the kernel at end of run. Checks strict replay policy.
         """
+        # Close tune module
+        tune = self.modules.get("tune")
+        if tune is not None and hasattr(tune, "close"):
+            try:
+                tune.close(env)
+            except Exception:
+                pass
+
         if self._freeze_state.mode not in ("replay", "replay_adjusted"):
             return
         remaining = self._recipe_player.remaining_entries
@@ -188,10 +226,10 @@ class HotKernel:
 
     def _apply_single(self, op: HotOp, env: dict, event: str, step: int) -> None:
         # freeze enforcement
-        if op.source == "external" and self._freeze_state.mode == "prod" and op.module in {"cb", "opt", "loss"}:
+        if op.source == "external" and self._freeze_state.mode == "prod" and op.module in {"cb", "opt", "loss", "tune"}:
             self._write_ledger(op, event, step, decision="ignored_freeze", payload=op.to_dict(), env=env)
             return
-        if op.source == "external" and self._freeze_state.mode in {"replay", "replay_adjusted"} and op.module in {"cb", "opt", "loss"}:
+        if op.source == "external" and self._freeze_state.mode in {"replay", "replay_adjusted"} and op.module in {"cb", "opt", "loss", "tune"}:
             self._write_ledger(op, event, step, decision="ignored_replay", payload=op.to_dict(), env=env)
             return
 
