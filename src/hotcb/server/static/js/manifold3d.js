@@ -88,7 +88,30 @@ function render3DPoints(ctx, points, interventionSteps) {
     if (intSet.has(i)) {
       colors.push(1, 0.3, 0.37);
     } else {
-      colors.push(t * 0, t * 0.83 + 0.17 * (1-t), t * 0.67 + 0.87 * (1-t));
+      // Multi-stop rainbow gradient: blue → cyan → green → yellow → orange → red
+      var r, g, b;
+      if (t < 0.2) {
+        // blue → cyan
+        var s = t / 0.2;
+        r = 0; g = s; b = 1;
+      } else if (t < 0.4) {
+        // cyan → green
+        var s = (t - 0.2) / 0.2;
+        r = 0; g = 1; b = 1 - s;
+      } else if (t < 0.6) {
+        // green → yellow
+        var s = (t - 0.4) / 0.2;
+        r = s; g = 1; b = 0;
+      } else if (t < 0.8) {
+        // yellow → orange
+        var s = (t - 0.6) / 0.2;
+        r = 1; g = 1 - s * 0.35; b = 0;
+      } else {
+        // orange → red
+        var s = (t - 0.8) / 0.2;
+        r = 1; g = 0.65 - s * 0.65; b = 0;
+      }
+      colors.push(r, g, b);
     }
   }
 
@@ -120,6 +143,20 @@ async function fetchManifold() {
   var points = data.points || data.embedding || [];
   var interventions = data.intervention_indices || [];
   render3DPoints(S.manifoldCtx, points, interventions);
+
+  // Update manifold info panel
+  var metricNames = data.metric_names || [];
+  var originalDims = metricNames.length;
+  var activeSubtab = document.querySelector('[data-subtab].active');
+  var isFeatureSpace = activeSubtab && activeSubtab.getAttribute('data-subtab') === 'feature-space';
+  var infoMethod = $('#manifoldInfoMethod');
+  var infoSpace = $('#manifoldInfoSpace');
+  var infoPoints = $('#manifoldInfoPoints');
+  var infoDims = $('#manifoldInfoDims');
+  if (infoMethod) infoMethod.textContent = (data.method || method).toUpperCase();
+  if (infoSpace) infoSpace.textContent = isFeatureSpace ? 'Feature Space' : 'Metric Space';
+  if (infoPoints) infoPoints.textContent = points.length;
+  if (infoDims) infoDims.textContent = originalDims + 'D \u2192 3D';
 }
 
 async function fetchFeatures() {
@@ -136,9 +173,11 @@ async function fetchFeatures() {
   }
 
   var points = [];
+  var featureDims = 0;
   data.snapshots.forEach(function(snap) {
     var acts = snap.activations || [];
     if (acts.length === 0) return;
+    if (acts[0] && acts[0].length > featureDims) featureDims = acts[0].length;
     var avg = [0, 0, 0];
     acts.forEach(function(row) {
       avg[0] += (row[0] || 0) / acts.length;
@@ -148,4 +187,14 @@ async function fetchFeatures() {
     points.push(avg);
   });
   render3DPoints(S.featureCtx, points, []);
+
+  // Update manifold info panel for feature space
+  var infoMethod = $('#manifoldInfoMethod');
+  var infoSpace = $('#manifoldInfoSpace');
+  var infoPoints = $('#manifoldInfoPoints');
+  var infoDims = $('#manifoldInfoDims');
+  if (infoMethod) infoMethod.textContent = 'AVG';
+  if (infoSpace) infoSpace.textContent = 'Feature Space';
+  if (infoPoints) infoPoints.textContent = points.length;
+  if (infoDims) infoDims.textContent = featureDims + 'D \u2192 3D';
 }

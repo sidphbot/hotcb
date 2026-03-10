@@ -32,6 +32,8 @@ function _clearTrainingState() {
   setHealth(50, 'Reset \u2014 ready');
   var tl = $('#timelineList');
   if (tl) tl.innerHTML = '';
+  var saveDetail = document.querySelector('.save-recipe-detail');
+  if (saveDetail) saveDetail.remove();
   $('#mutationCount').textContent = '0';
   $('#stepValue').textContent = '--';
 }
@@ -120,7 +122,36 @@ function initControls() {
 
   // Freeze
   $('#freezeSelect').addEventListener('change', async function(e) {
-    await api('POST', '/api/freeze', {mode: e.target.value});
+    var mode = e.target.value;
+    if (mode !== 'off') {
+      if (!confirm('Freeze mode "' + mode + '" will lock parameters. This cannot be easily undone. Continue?')) {
+        e.target.value = 'off';
+        return;
+      }
+    }
+    await api('POST', '/api/freeze', {mode: mode});
+    if (mode !== 'off') {
+      e.target.disabled = true;
+      e.target.style.opacity = '0.5';
+      // Show unlock button
+      var unlockBtn = document.getElementById('btnFreezeUnlock');
+      if (!unlockBtn) {
+        unlockBtn = document.createElement('button');
+        unlockBtn.id = 'btnFreezeUnlock';
+        unlockBtn.className = 'btn btn-sm';
+        unlockBtn.textContent = 'Unlock';
+        unlockBtn.style.cssText = 'font-size:8px;color:var(--red);margin-left:4px;';
+        unlockBtn.addEventListener('click', async function() {
+          if (!confirm('Are you sure you want to unlock freeze? This overrides safety controls.')) return;
+          await api('POST', '/api/freeze', {mode: 'off'});
+          e.target.disabled = false;
+          e.target.style.opacity = '1';
+          e.target.value = 'off';
+          unlockBtn.remove();
+        });
+        e.target.parentNode.insertBefore(unlockBtn, e.target.nextSibling);
+      }
+    }
   });
 
   // Autopilot
@@ -174,7 +205,32 @@ function initControls() {
       max_steps: maxSteps,
       step_delay: stepDelay,
     });
-    if (res && !res.error) pollTrainStatus();
+    if (res && !res.error) {
+      pollTrainStatus();
+      // Auto-lock freeze dropdown if replay mode is selected
+      var freezeSel = $('#freezeSelect');
+      if (freezeSel && freezeSel.value !== 'off') {
+        freezeSel.disabled = true;
+        freezeSel.style.opacity = '0.5';
+        var unlockBtn = document.getElementById('btnFreezeUnlock');
+        if (!unlockBtn) {
+          unlockBtn = document.createElement('button');
+          unlockBtn.id = 'btnFreezeUnlock';
+          unlockBtn.className = 'btn btn-sm';
+          unlockBtn.textContent = 'Unlock';
+          unlockBtn.style.cssText = 'font-size:8px;color:var(--red);margin-left:4px;';
+          unlockBtn.addEventListener('click', async function() {
+            if (!confirm('Are you sure you want to unlock freeze? This overrides safety controls.')) return;
+            await api('POST', '/api/freeze', {mode: 'off'});
+            freezeSel.disabled = false;
+            freezeSel.style.opacity = '1';
+            freezeSel.value = 'off';
+            unlockBtn.remove();
+          });
+          freezeSel.parentNode.insertBefore(unlockBtn, freezeSel.nextSibling);
+        }
+      }
+    }
   });
   $('#btnTrainStop').addEventListener('click', async function() {
     var btn = $('#btnTrainStop');
@@ -320,6 +376,22 @@ function computeHealth() {
              score >= 40 ? 'Plateau \u2014 consider intervention' :
              'Warning \u2014 loss increasing';
   setHealth(score, desc);
+  updateHealthMetrics();
+}
+
+function updateHealthMetrics() {
+  var el = document.getElementById('healthMetrics');
+  if (!el) return;
+  var keys = ['train_loss', 'val_loss', 'lr', 'accuracy', 'val_accuracy', 'grad_norm'];
+  el.innerHTML = '';
+  keys.forEach(function(k) {
+    var v = S.latestMetrics[k];
+    if (v === undefined) return;
+    var div = document.createElement('div');
+    div.style.cssText = 'display:flex;justify-content:space-between;';
+    div.innerHTML = '<span style="color:var(--text-muted)">' + k + '</span><span style="color:var(--text-primary)">' + fmtNum(v) + '</span>';
+    el.appendChild(div);
+  });
 }
 
 function setHealth(score, desc) {
@@ -415,10 +487,9 @@ function initSaveAsRecipe() {
         '<button class="btn btn-sm btn-accent" id="btnViewInRecipeEditor">View in Recipe Editor</button>';
 
       detail.querySelector('#btnViewInRecipeEditor').addEventListener('click', function() {
-        // Switch to the recipe-editor tab
+        fetchRecipe();  // reload recipe data
         var tab = document.querySelector('.tab[data-tab="recipe-editor"]');
         if (tab) tab.click();
-        // Remove the detail panel
         detail.remove();
       });
 

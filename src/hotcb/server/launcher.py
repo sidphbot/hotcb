@@ -192,6 +192,21 @@ class TrainingLauncher:
             with open(freeze_path, "w") as f:
                 json.dump({"mode": "off"}, f)
 
+        # Write run metadata
+        import time as _time
+        run_meta = {
+            "run_id": _time.strftime("%Y%m%d_%H%M%S"),
+            "config_id": config_id,
+            "config_name": cfg.name,
+            "max_steps": effective_steps,
+            "step_delay": effective_delay,
+            "started_at": self._started_at,
+            "run_dir": self._active_run_dir,
+        }
+        self._run_meta = run_meta
+        with open(os.path.join(self._active_run_dir, "hotcb.run.json"), "w") as f:
+            json.dump(run_meta, f, indent=2)
+
         log.info(
             "[hotcb.launcher] starting %s (run_dir=%s, steps=%d, delay=%.3f)",
             cfg.name, self._active_run_dir, effective_steps, effective_delay,
@@ -228,6 +243,51 @@ class TrainingLauncher:
             train_fn(run_dir, max_steps, step_delay, self._stop_event)
         except Exception:
             log.exception("[hotcb.launcher] training thread crashed")
+        finally:
+            self._save_run_summary(run_dir)
+
+    def _save_run_summary(self, run_dir: str) -> None:
+        """Append completed run summary to runs history."""
+        import time as _time
+        # Read final metrics from metrics JSONL
+        metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")
+        final_metrics: dict = {}
+        if os.path.exists(metrics_path):
+            last_line = None
+            with open(metrics_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        last_line = line
+            if last_line:
+                try:
+                    rec = json.loads(last_line)
+                    final_metrics = rec.get("metrics", {})
+                except Exception:
+                    pass
+
+        summary = dict(getattr(self, '_run_meta', {}))
+        summary["completed_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
+        summary["final_metrics"] = final_metrics
+        summary["stopped_early"] = self._stop_event.is_set()
+
+        # Update the run.json
+        run_json = os.path.join(run_dir, "hotcb.run.json")
+        try:
+            with open(run_json, "w") as f:
+                json.dump(summary, f, indent=2)
+        except Exception:
+            pass
+
+        # Append to parent-level history
+        parent_dir = os.path.dirname(run_dir.rstrip("/"))
+        if parent_dir:
+            history_path = os.path.join(parent_dir, "hotcb.runs.jsonl")
+            try:
+                with open(history_path, "a") as f:
+                    f.write(json.dumps(summary) + "\n")
+            except Exception:
+                pass
 
     def stop(self) -> dict:
         if not self.running:
@@ -309,6 +369,117 @@ def create_router(launcher: Optional[TrainingLauncher] = None) -> Any:
         if "error" in result:
             return JSONResponse(status_code=404, content=result)
         return result
+
+    class RegisterRequest(BaseModel):
+        config_id: str
+        name: str
+        description: str = ""
+        train_fn_path: str  # "module.path:function_name"
+        defaults: dict = {"max_steps": 1000, "step_delay": 0.1}
+        recipe_path: Optional[str] = None
+
+    @router.post("/configs/register")
+    async def register_config(body: RegisterRequest):
+        """Dynamically register a custom training config."""
+        import importlib
+        try:
+            module_path, fn_name = body.train_fn_path.rsplit(":", 1)
+            mod = importlib.import_module(module_path)
+            train_fn = getattr(mod, fn_name)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"Cannot import '{body.train_fn_path}': {exc}"},
+            )
+        cfg = TrainingConfig(
+            config_id=body.config_id,
+            name=body.name,
+            description=body.description,
+            train_fn=train_fn,
+            defaults=body.defaults,
+        )
+        _launcher.register_config(cfg)
+        return {"status": "registered", "config_id": body.config_id}
+
+    @router.get("/runs/history")
+    async def list_runs():
+        """List completed training runs from the runs history."""
+        run_dir = _launcher._run_dir
+        parent_dir = os.path.dirname(run_dir.rstrip("/"))
+        history_path = os.path.join(parent_dir, "hotcb.runs.jsonl") if parent_dir else None
+
+        runs = []
+        # Check for history file
+        if history_path and os.path.exists(history_path):
+            with open(history_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            runs.append(json.loads(line))
+                        except Exception:
+                            pass
+
+        # Also check for run.json in the current run_dir
+        run_json = os.path.join(run_dir, "hotcb.run.json")
+        if os.path.exists(run_json):
+            try:
+                with open(run_json) as f:
+                    current = json.load(f)
+                # Check if it's already in history
+                if not any(r.get("run_id") == current.get("run_id") for r in runs):
+                    runs.append(current)
+            except Exception:
+                pass
+
+        return {"runs": runs}
+
+    @router.get("/runs/{run_id}/metrics")
+    async def get_run_metrics(run_id: str, last_n: int = 2000):
+        """Get metrics from a specific run by its ID."""
+        run_dir = _launcher._run_dir
+        parent_dir = os.path.dirname(run_dir.rstrip("/"))
+
+        # Find the run directory
+        target_dir = None
+        # Check current run_dir
+        run_json = os.path.join(run_dir, "hotcb.run.json")
+        if os.path.exists(run_json):
+            with open(run_json) as f:
+                meta = json.load(f)
+            if meta.get("run_id") == run_id:
+                target_dir = run_dir
+
+        # Check history
+        if not target_dir and parent_dir:
+            history_path = os.path.join(parent_dir, "hotcb.runs.jsonl")
+            if os.path.exists(history_path):
+                with open(history_path) as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            if entry.get("run_id") == run_id and entry.get("run_dir"):
+                                target_dir = entry["run_dir"]
+                                break
+                        except Exception:
+                            pass
+
+        if not target_dir:
+            return JSONResponse(status_code=404, content={"error": f"Run {run_id} not found"})
+
+        metrics_path = os.path.join(target_dir, "hotcb.metrics.jsonl")
+        records = []
+        if os.path.exists(metrics_path):
+            with open(metrics_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            pass
+
+        return {"run_id": run_id, "records": records[-last_n:]}
 
     @router.post("/reset")
     async def reset_training(request: Request):

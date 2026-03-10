@@ -86,12 +86,14 @@ def _demo_training(
                     "step": step, "module": "opt", "op": "set_params",
                     "params": {"lr": lr, "weight_decay": wd},
                     "decision": "applied", "status": "applied",
+                    "source": cmd.get("source", "interactive"),
                 })
             elif module == "loss" and op == "set_params":
                 _write_jsonl(applied_path, {
                     "step": step, "module": "loss", "op": "set_params",
                     "params": params,
                     "decision": "applied", "status": "applied",
+                    "source": cmd.get("source", "interactive"),
                 })
 
         # Simulate loss decay with noise

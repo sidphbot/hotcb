@@ -33,3 +33,41 @@ function getColor(name) {
   }
   return S.metricColors[name];
 }
+
+function saveUIState() {
+  var state = {
+    activeTab: null,
+    trainConfig: null,
+    pinnedMetrics: [],
+    knobs: {},
+    metricVisibility: {},
+  };
+  // Active tab
+  var activeTab = document.querySelector('.tabs .tab.active[data-tab]');
+  if (activeTab) state.activeTab = activeTab.dataset.tab;
+  // Train config
+  var sel = document.getElementById('trainConfig');
+  if (sel) state.trainConfig = sel.value;
+  // Pinned metrics
+  state.pinnedMetrics = Array.from(S.pinnedMetrics || []);
+  // Knobs
+  var lr = document.getElementById('knobLr');
+  var wd = document.getElementById('knobWd');
+  if (lr) state.knobs.lr = lr.value;
+  if (wd) state.knobs.wd = wd.value;
+  // Metric visibility
+  if (S.metricNames) {
+    S.metricNames.forEach(function(name) {
+      state.metricVisibility[name] = S.metricsData[name] ? true : false;
+    });
+  }
+  localStorage.setItem('hotcb-ui-state', JSON.stringify(state));
+}
+
+function loadUIState() {
+  try {
+    var raw = localStorage.getItem('hotcb-ui-state');
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch(e) { return null; }
+}

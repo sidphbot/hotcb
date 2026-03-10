@@ -303,6 +303,10 @@ class DiffRequest(BaseModel):
     other_path: str
 
 
+class ImportRequest(BaseModel):
+    path: str
+
+
 class ExportRequest(BaseModel):
     path: str
 
@@ -396,6 +400,30 @@ async def diff_recipe(body: DiffRequest, request: Request):
 async def get_timeline(request: Request):
     editor = _get_editor(request)
     return {"timeline": editor.timeline()}
+
+
+@router.post("/import")
+async def import_recipe(body: ImportRequest, request: Request):
+    """Import entries from an external recipe file."""
+    from fastapi.responses import JSONResponse
+    if not os.path.exists(body.path):
+        return JSONResponse(status_code=404, content={"error": f"File not found: {body.path}"})
+    editor = _get_editor(request)
+    imported = 0
+    with open(body.path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                editor.add(entry)
+                imported += 1
+            except Exception:
+                pass
+    if imported > 0:
+        editor.save()
+    return {"status": "imported", "count": imported}
 
 
 @router.post("/export")

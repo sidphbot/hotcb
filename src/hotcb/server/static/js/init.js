@@ -73,7 +73,44 @@ async function initialLoad() {
   initCallHelp();
   initSaveAsRecipe();
   initCallbackDiagnostics();
+  initConfigWizard();
+  initCompare();
   createMetricsChart();
   initialLoad();
   connectWS();
+
+  // Restore UI state from localStorage
+  var savedState = loadUIState();
+  if (savedState) {
+    if (savedState.activeTab) {
+      var tab = document.querySelector('.tab[data-tab="' + savedState.activeTab + '"]');
+      if (tab) tab.click();
+    }
+    if (savedState.trainConfig) {
+      var sel = document.getElementById('trainConfig');
+      if (sel) {
+        sel.value = savedState.trainConfig;
+        sel.dispatchEvent(new Event('change'));
+      }
+    }
+    if (savedState.pinnedMetrics && savedState.pinnedMetrics.length) {
+      savedState.pinnedMetrics.forEach(function(name) {
+        S.pinnedMetrics.add(name);
+      });
+    }
+    if (savedState.knobs) {
+      if (savedState.knobs.lr) {
+        var lr = document.getElementById('knobLr');
+        if (lr) { lr.value = savedState.knobs.lr; lr.dispatchEvent(new Event('input')); }
+      }
+      if (savedState.knobs.wd) {
+        var wd = document.getElementById('knobWd');
+        if (wd) { wd.value = savedState.knobs.wd; wd.dispatchEvent(new Event('input')); }
+      }
+    }
+  }
+
+  // Persist UI state periodically and before page unload
+  setInterval(saveUIState, 5000);
+  window.addEventListener('beforeunload', saveUIState);
 })();

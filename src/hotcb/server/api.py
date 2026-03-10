@@ -337,7 +337,7 @@ async def save_applied_as_recipe(request: Request):
     """Convert applied mutation history into a recipe file."""
     run_dir: str = request.app.state.run_dir
     applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
-    recipe_path = os.path.join(run_dir, "hotcb.recipe.from_applied.jsonl")
+    recipe_path = os.path.join(run_dir, "hotcb.recipe.jsonl")
 
     if not os.path.exists(applied_path):
         return {"status": "error", "detail": "No applied mutations found"}

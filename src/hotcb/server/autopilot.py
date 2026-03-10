@@ -199,15 +199,17 @@ class AutopilotEngine:
         self._mode = mode
 
     def reset(self) -> None:
-        """Clear all metric history, action history, and cooldown state.
+        """Clear all metric history, action history, cooldown state, and mode.
 
         Called when a new training run starts so stale data doesn't
-        trigger phantom rules.
+        trigger phantom rules.  Mode is reset to ``"off"`` so autopilot
+        never carries over between runs.
         """
         self._metric_history.clear()
         self._history.clear()
         self._last_fired.clear()
-        log.info("[hotcb.autopilot] state reset")
+        self._mode = "off"
+        log.info("[hotcb.autopilot] state reset (mode -> off)")
 
     # -- Rules --------------------------------------------------------------
 
