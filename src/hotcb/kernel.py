@@ -34,6 +34,7 @@ class HotKernel:
         yaml_path: Optional[str] = None,
         log_path: Optional[str] = None,
         tune_recipe_path: Optional[str] = None,
+        metrics_collector: Optional[object] = None,
     ) -> None:
         self.run_dir = run_dir
         self.debounce_steps = max(1, int(debounce_steps))
@@ -49,6 +50,7 @@ class HotKernel:
         self.yaml_path = yaml_path or os.path.join(run_dir, "hotcb.yaml")
         self.sources_dir = os.path.join(run_dir, "hotcb.sources")
         self.log_path = log_path or os.path.join(run_dir, "hotcb.log")
+        self._metrics_collector = metrics_collector
 
         self._freeze_state = FreezeState.load(self.freeze_path)
         self._recipe_player = RecipePlayer(
@@ -168,6 +170,13 @@ class HotKernel:
                     tune.on_event(ev, env)
                 except Exception:
                     pass  # defensive — never crash training
+
+        # collect metrics (zero overhead when collector is None)
+        if self._metrics_collector is not None:
+            try:
+                self._metrics_collector.collect(env)
+            except Exception:
+                pass  # never crash training
 
     def close(self, env: Optional[Dict[str, object]] = None) -> None:
         """

@@ -39,9 +39,15 @@ def read_new_jsonl(cursor: FileCursor, max_lines: int = 10_000) -> Tuple[List[di
     if not os.path.exists(cursor.path):
         return [], cursor
 
+    # Detect file truncation (reset)
+    file_size = os.path.getsize(cursor.path)
+    effective_offset = cursor.offset
+    if file_size < effective_offset:
+        effective_offset = 0  # file was truncated, start from beginning
+
     out: List[dict] = []
     with open(cursor.path, "r", encoding="utf-8") as f:
-        f.seek(cursor.offset)
+        f.seek(effective_offset)
         for _ in range(max_lines):
             line = f.readline()
             if not line:

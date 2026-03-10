@@ -255,6 +255,118 @@ def cmd_tune_status(args: argparse.Namespace) -> None:
         print("No tune summary found.")
 
 
+def cmd_bench(args: argparse.Namespace) -> None:
+    """Run benchmarks."""
+    from .bench.tasks import BUILTIN_TASKS
+    from .bench.runner import BenchmarkRunner
+    from .bench.report import BenchmarkReport
+
+    task_factory = BUILTIN_TASKS.get(args.task)
+    if task_factory is None:
+        raise SystemExit(f"Unknown task: {args.task}. Available: {list(BUILTIN_TASKS)}")
+
+    max_steps = args.max_steps
+    task = task_factory(max_steps=max_steps) if max_steps else task_factory()
+
+    runner = BenchmarkRunner(output_dir=args.output_dir)
+    conditions = [c.strip() for c in args.conditions.split(",")]
+
+    for cond in conditions:
+        if cond == "baseline":
+            result = runner.run_baseline(task)
+        elif cond == "auto_tune":
+            result = runner.run_with_hotcb(task)
+        elif cond == "recipe_replay":
+            # Need a recipe from a prior auto_tune run
+            prev = [r for r in runner.results if r.recipe_path]
+            if not prev:
+                print("Skipping recipe_replay: no recipe available")
+                continue
+            result = runner.run_recipe_replay(task, prev[-1].recipe_path)
+        else:
+            print(f"Unknown condition: {cond}")
+            continue
+        print(f"  {cond}: loss={result.final_metrics.get('loss', '?'):.6f} "
+              f"steps={result.total_steps} time={result.total_time_sec:.3f}s")
+
+    report = BenchmarkReport(runner.results)
+    print()
+    print(report.summary_table())
+    report.to_json(os.path.join(args.output_dir, "benchmark.json"))
+    report.to_csv(os.path.join(args.output_dir, "benchmark.csv"))
+    print(f"\nResults saved to {args.output_dir}/")
+
+
+def cmd_bench_eval(args: argparse.Namespace) -> None:
+    """Run autopilot evaluation against a published benchmark."""
+    from .bench.eval_autopilot import AutopilotEval
+
+    ev = AutopilotEval(output_dir=args.output_dir)
+
+    phases = [p.strip() for p in args.phases.split(",")]
+
+    for phase in phases:
+        if phase == "baseline":
+            print(f"Running published baseline for {args.task} ...")
+            result = ev.run_published_baseline(args.task)
+            acc = result.final_metrics.get("val_accuracy", "?")
+            print(f"  Baseline done: val_accuracy={acc}  time={result.total_time_sec:.1f}s")
+        elif phase == "autopilot":
+            print(f"Running autopilot challenge for {args.task} ...")
+            result = ev.run_autopilot_challenge(
+                args.task,
+                guidelines_path=args.guidelines,
+            )
+            acc = result.final_metrics.get("val_accuracy", "?")
+            print(f"  Autopilot done: val_accuracy={acc}  time={result.total_time_sec:.1f}s")
+        else:
+            print(f"Unknown phase: {phase}")
+
+    print()
+    print(ev.report())
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    """Start the dashboard server."""
+    from .server.app import run_server
+
+    multi_dirs = None
+    if args.dirs:
+        multi_dirs = [d.strip() for d in args.dirs.split(",") if d.strip()]
+
+    run_server(
+        run_dir=args.dir,
+        host=args.host,
+        port=args.port,
+        poll_interval=args.poll_interval,
+        multi_dirs=multi_dirs,
+    )
+
+
+def cmd_demo(args: argparse.Namespace) -> None:
+    """Launch a demo: synthetic training + live dashboard."""
+    if args.golden:
+        from .golden_demo import run_golden_demo
+
+        run_golden_demo(
+            host=args.host,
+            port=args.port,
+            max_steps=args.max_steps,
+            step_delay=args.step_delay,
+            run_dir=args.demo_dir if args.demo_dir else None,
+        )
+    else:
+        from .demo import run_demo
+
+        run_demo(
+            host=args.host,
+            port=args.port,
+            max_steps=args.max_steps,
+            step_delay=args.step_delay,
+            run_dir=args.demo_dir if args.demo_dir else None,
+        )
+
+
 def cmd_tune_export_recipe(args: argparse.Namespace) -> None:
     run_dir = args.dir
     out = args.out or os.path.join(run_dir, "hotcb.tune.recipe.yaml")
@@ -481,6 +593,56 @@ def build_parser() -> argparse.ArgumentParser:
     pset_loss.add_argument("--id", default="main")
     pset_loss.add_argument("kv", nargs="*")
     pset_loss.set_defaults(func=cmd_loss)
+
+    pbench = sub.add_parser("bench", help="Run benchmarks")
+    bench_sub = pbench.add_subparsers(dest="bench_cmd")
+
+    # `hotcb bench run` — original benchmark runner
+    pbench_run = bench_sub.add_parser("run", help="Run benchmark conditions")
+    pbench_run.add_argument("--task", default="synthetic_quadratic",
+                            help="Task name (synthetic_quadratic, synthetic_classification, cifar10_resnet20)")
+    pbench_run.add_argument("--output-dir", default="./bench_output", help="Output directory")
+    pbench_run.add_argument("--conditions", default="baseline,auto_tune",
+                            help="Comma-separated conditions to run")
+    pbench_run.add_argument("--max-steps", type=int, default=None, help="Override max steps")
+    pbench_run.set_defaults(func=cmd_bench)
+
+    # `hotcb bench eval` — autopilot evaluation
+    pbench_eval = bench_sub.add_parser("eval", help="Run autopilot evaluation against published benchmark")
+    pbench_eval.add_argument("--task", default="cifar10_resnet20",
+                             help="Task name (cifar10_resnet20)")
+    pbench_eval.add_argument("--output-dir", default="./eval_output", help="Output directory")
+    pbench_eval.add_argument("--phases", default="baseline,autopilot",
+                             help="Comma-separated phases: baseline, autopilot")
+    pbench_eval.add_argument("--guidelines", default=None,
+                             help="Path to YAML guidelines file for autopilot rules")
+    pbench_eval.set_defaults(func=cmd_bench_eval)
+
+    # Also allow bare `hotcb bench` to fall through to `run` for backwards compat
+    pbench.add_argument("--task", default="synthetic_quadratic",
+                        help="Task name (synthetic_quadratic, synthetic_classification, cifar10_resnet20)")
+    pbench.add_argument("--output-dir", default="./bench_output", help="Output directory")
+    pbench.add_argument("--conditions", default="baseline,auto_tune",
+                        help="Comma-separated conditions to run")
+    pbench.add_argument("--max-steps", type=int, default=None, help="Override max steps")
+    pbench.set_defaults(func=cmd_bench)
+
+    pdemo = sub.add_parser("demo", help="Launch synthetic training with live dashboard")
+    pdemo.add_argument("--golden", action="store_true",
+                       help="Run the golden demo (multi-task with recipe-driven loss shifts and feature capture)")
+    pdemo.add_argument("--host", default="0.0.0.0", help="Bind host")
+    pdemo.add_argument("--port", type=int, default=8421, help="Bind port")
+    pdemo.add_argument("--max-steps", type=int, default=500, help="Number of training steps")
+    pdemo.add_argument("--step-delay", type=float, default=0.15, help="Seconds between steps")
+    pdemo.add_argument("--demo-dir", default=None, help="Run directory (default: temp dir)")
+    pdemo.set_defaults(func=cmd_demo)
+
+    pserve = sub.add_parser("serve", help="Start the live dashboard server")
+    pserve.add_argument("--host", default="0.0.0.0", help="Bind host")
+    pserve.add_argument("--port", type=int, default=8421, help="Bind port")
+    pserve.add_argument("--poll-interval", type=float, default=0.5, help="JSONL poll interval (seconds)")
+    pserve.add_argument("--dirs", help="Comma-separated additional run dirs for multi-run comparison")
+    pserve.set_defaults(func=cmd_serve)
 
     ptune = sub.add_parser("tune", help="Tune module control")
     tune_sub = ptune.add_subparsers(dest="tune_command", required=True)

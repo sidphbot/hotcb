@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hotcb Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+<div id="app">
+
+<!-- ============================================================== -->
+<!-- Header                                                          -->
+<!-- ============================================================== -->
+<header>
+  <div class="header-left">
+    <div class="logo">hotcb<span>live training control plane</span></div>
+    <div class="header-badge">
+      <span class="status-dot connecting" id="wsStatus"></span>
+      <span id="wsLabel">connecting</span>
+    </div>
+    <div class="run-selector" id="runSelector"></div>
+    <div class="step-counter" id="stepCounter">
+      <span class="step-label">step</span>
+      <span id="stepValue">--</span>
+    </div>
+  </div>
+  <div class="header-right">
+    <select class="header-select" id="themeSelect" title="Theme">
+      <option value="midnight">Midnight</option>
+      <option value="light">Light</option>
+      <option value="solarized">Solarized</option>
+      <option value="paper">Paper</option>
+    </select>
+<select class="header-select" id="freezeSelect" title="Freeze Mode">
+      <option value="off">Live</option>
+      <option value="prod">Frozen</option>
+      <option value="replay">Replay</option>
+    </select>
+    <button class="btn btn-sm" id="btnTour" title="Show guided tour">Tour</button>
+    <button class="btn btn-sm" id="btnCallHelp" title="Send training snapshot for help">SOS</button>
+    <button class="btn btn-sm btn-accent" id="btnNotif" title="Notifications">Alerts</button>
+  </div>
+</header>
+
+<!-- ============================================================== -->
+<!-- Main                                                            -->
+<!-- ============================================================== -->
+<div class="main">
+
+<!-- LEFT COLUMN -->
+<div class="left-col">
+  <div class="chart-area">
+    <div class="tabs">
+      <div class="tab active" data-tab="metrics">Metrics</div>
+      <div class="tab" data-tab="manifold">Manifold</div>
+      <div class="tab" data-tab="recipe-editor">Recipe</div>
+    </div>
+
+    <!-- TAB: Metrics -->
+    <div class="tab-content active" data-tab="metrics">
+      <div class="chart-toolbar">
+        <div class="metric-toggles" id="metricToggles"></div>
+      </div>
+      <div class="chart-wrap"><canvas id="metricsChart"></canvas></div>
+    </div>
+
+    <!-- TAB: Manifold (3D) -->
+    <div class="tab-content" data-tab="manifold">
+      <div class="chart-toolbar">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span class="tab active" data-subtab="metric-space" style="padding:4px 8px;font-size:10px">Metric Space</span>
+          <span class="tab" data-subtab="feature-space" style="padding:4px 8px;font-size:10px">Feature Space</span>
+        </div>
+        <select class="header-select" id="manifoldMethod" style="width:80px">
+          <option value="pca">PCA</option>
+          <option value="umap">UMAP</option>
+          <option value="tsne">t-SNE</option>
+        </select>
+      </div>
+      <div style="flex:1;position:relative;min-height:0;padding:6px;">
+        <div id="manifold-3d"></div>
+      </div>
+    </div>
+
+    <!-- TAB: Recipe Editor -->
+    <div class="tab-content" data-tab="recipe-editor">
+      <div class="chart-toolbar">
+        <span style="font-size:10px;color:var(--text-muted)">Recipe Timeline Editor</span>
+        <div class="btn-group">
+          <button class="btn btn-sm btn-accent" id="btnRecipeAdd">+ Add</button>
+          <button class="btn btn-sm" id="btnRecipeExport">Export</button>
+          <button class="btn btn-sm" id="btnRecipeValidate">Validate</button>
+          <button class="btn btn-sm" id="btnRecipeDiff">Diff</button>
+          <button class="btn btn-sm" id="btnRecipeReplay">Replay Preview</button>
+        </div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:4px 8px;" id="recipeList"></div>
+      <div id="recipeReplayPreview" style="display:none;padding:8px;overflow-y:auto;max-height:40%;border-top:1px solid var(--border)"></div>
+      <div id="recipeDiffView" style="display:none;padding:8px;overflow-y:auto;max-height:40%;border-top:1px solid var(--border)"></div>
+    </div>
+  </div>
+
+  <!-- Pinned Metric Cards -->
+  <div id="metricCards" class="metric-cards-container"></div>
+
+  <!-- Bottom: Mutation Timeline -->
+  <div class="bottom-panel">
+    <div class="card-header">
+      Applied Mutations
+      <span id="mutationCount" style="color:var(--accent)">0</span>
+      <button class="btn btn-sm" id="btnSaveAsRecipe" title="Save applied mutations as a recipe file">Save as Recipe</button>
+    </div>
+    <div class="timeline-list" id="timelineList"></div>
+    <div id="impactSummary" style="display:none;padding:8px;border-top:1px solid var(--border);font-size:11px;"></div>
+  </div>
+</div>
+
+<!-- RIGHT COLUMN -->
+<div class="right-col">
+
+  <!-- Health Score -->
+  <div class="card" id="healthCard">
+    <div class="card-header">Training Health</div>
+    <div class="card-body" style="display:flex;align-items:center;gap:8px;">
+      <span id="healthScore" style="font-size:22px;font-weight:700;font-family:var(--font-mono);color:var(--accent)">--</span>
+      <div style="flex:1">
+        <div class="health-bar" style="display:block"><div class="health-fill" id="healthFill" style="width:0%;background:var(--accent)"></div></div>
+        <div style="font-size:9px;color:var(--text-muted);margin-top:2px" id="healthDesc">Evaluating...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat (vibe-coder) -->
+  <div class="card chat-panel">
+    <div class="card-header">Command Bar</div>
+    <div class="chat-messages" id="chatMessages"></div>
+    <div class="chat-input-row">
+      <input type="text" id="chatInput" placeholder='e.g. "learn faster", "reduce overfitting"'>
+      <button class="btn btn-accent" id="btnChatSend">Send</button>
+    </div>
+  </div>
+
+  <!-- Knob Panel -->
+  <div class="card">
+    <div class="card-header">
+      Controls
+      <div class="btn-group">
+        <button class="btn btn-sm btn-accent" id="btnApply">Apply</button>
+        <button class="btn btn-sm" id="btnSchedule">Schedule</button>
+      </div>
+    </div>
+    <div class="card-body" id="knobPanel">
+      <div class="knob-row" data-param="lr">
+        <span class="knob-label">lr</span>
+        <input type="range" min="-6" max="0" step="0.01" value="-3.5" id="knobLr">
+        <input type="text" class="knob-input" id="knobLrVal" value="3.16e-4">
+      </div>
+      <div class="knob-explain">Learning Rate controls how big each step is. Too high = unstable training. Too low = slow progress.</div>
+
+      <div class="knob-row" data-param="wd">
+        <span class="knob-label">wd</span>
+        <input type="range" min="-6" max="-1" step="0.01" value="-4" id="knobWd">
+        <input type="text" class="knob-input" id="knobWdVal" value="1.00e-4">
+      </div>
+      <div class="knob-explain">Weight Decay prevents memorization. Higher = more regularization, less overfitting risk.</div>
+
+      <div class="knob-row single-loss-only" data-param="loss_w">
+        <span class="knob-label">loss_w</span>
+        <input type="range" min="0" max="1" step="0.01" value="1" id="knobLossW">
+        <input type="text" class="knob-input" id="knobLossWVal" value="1.00">
+      </div>
+      <div class="knob-explain single-loss-only">Loss Weight controls how much this component matters relative to others.</div>
+
+      <div class="knob-row multitask-only" data-param="weight_a" style="display:none">
+        <span class="knob-label">&lambda;_A</span>
+        <input type="range" min="0" max="1" step="0.01" value="0.7" id="knobWeightA">
+        <input type="text" class="knob-input" id="knobWeightAVal" value="0.70">
+      </div>
+      <div class="knob-explain multitask-only" style="display:none">Task A (classification) weight. Increase to focus on classification accuracy.</div>
+      <div class="knob-row multitask-only" data-param="weight_b" style="display:none">
+        <span class="knob-label">&lambda;_B</span>
+        <input type="range" min="0" max="1" step="0.01" value="0.3" id="knobWeightB">
+        <input type="text" class="knob-input" id="knobWeightBVal" value="0.30">
+      </div>
+      <div class="knob-explain multitask-only" style="display:none">Task B (reconstruction) weight. Increase to focus on reconstruction quality.</div>
+
+      <div class="knob-row finetune-only" data-param="backbone_frozen" style="display:none">
+        <span class="knob-label">Backbone</span>
+        <select id="knobBackbone" style="flex:1;font-size:11px;padding:2px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:3px">
+          <option value="1">Frozen</option>
+          <option value="0">Unfrozen</option>
+        </select>
+      </div>
+      <div class="knob-explain finetune-only" style="display:none">Toggle backbone freeze/unfreeze. Unfreezing enables full model finetuning.</div>
+    </div>
+  </div>
+
+  <!-- Autopilot -->
+  <div class="card ">
+    <div class="card-header">
+      Autopilot
+      <select class="header-select" id="autopilotMode" style="font-size:9px;width:80px">
+        <option value="off">Off</option>
+        <option value="suggest">Suggest</option>
+        <option value="auto">Auto</option>
+      </select>
+    </div>
+    <div class="card-body" id="autopilotPanel">
+      <div style="font-size:10px;color:var(--text-muted)" id="autopilotStatus">No actions yet</div>
+    </div>
+  </div>
+
+  <!-- Training Launcher -->
+  <div class="card">
+    <div class="card-header">
+      Training
+      <div class="btn-group">
+        <button class="btn btn-sm btn-accent" id="btnTrainStart">Start</button>
+        <button class="btn btn-sm" id="btnTrainStop" disabled>Stop</button>
+        <button class="btn btn-sm" id="btnTrainReset" title="Stop training and clear all data">Reset</button>
+      </div>
+    </div>
+    <div class="card-body" id="trainPanel">
+      <div style="font-size:10px;color:var(--text-muted)" id="trainStatus">Stopped</div>
+      <select class="header-select" id="trainConfig" style="width:100%;margin-top:6px;font-size:10px;padding:3px 4px;">
+        <option value="simple">Simple (Quadratic)</option>
+        <option value="multitask" selected>Multi-Objective (Golden Demo)</option>
+        <option value="finetune">Finetune (Pretrained Backbone)</option>
+      </select>
+      <div style="font-size:9px;color:var(--text-muted);margin-top:3px;line-height:1.3" id="trainConfigDesc">Two-task training with recipe-driven loss weight shifts.</div>
+      <div style="display:flex;gap:8px;margin-top:6px;align-items:center;font-size:10px;">
+        <label style="color:var(--text-muted)">Steps</label>
+        <input type="number" id="trainMaxSteps" value="800" min="1" max="50000" style="width:60px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+        <label style="color:var(--text-muted)">Delay</label>
+        <input type="number" id="trainStepDelay" value="0.12" min="0.01" max="5" step="0.01" style="width:55px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+        <span style="color:var(--text-muted)">s</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Callback Diagnostics -->
+  <div class="card">
+    <div class="card-header">
+      Callbacks
+      <div class="btn-group">
+        <button class="btn btn-sm" id="btnCbToggleLoad" title="Register a new callback">+ Load</button>
+        <button class="btn btn-sm" id="btnCbRefresh" title="Refresh callback list">Refresh</button>
+      </div>
+    </div>
+    <div class="card-body" id="cbPanel" style="max-height:240px;overflow-y:auto">
+      <div id="cbLoadForm" style="display:none;padding:6px 0;border-bottom:1px solid var(--border);margin-bottom:6px;">
+        <div style="display:flex;flex-direction:column;gap:4px;font-size:10px;">
+          <input type="text" id="cbLoadId" placeholder="Callback ID (e.g. my_callback)" style="font-size:10px;padding:3px 6px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+          <input type="text" id="cbLoadPath" placeholder="Host path (e.g. /home/user/my_callback.py)" style="font-size:10px;padding:3px 6px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+          <div style="display:flex;gap:4px;">
+            <button class="btn btn-sm btn-accent" id="btnCbLoadSubmit" style="font-size:9px;">Load</button>
+            <button class="btn btn-sm" id="btnCbLoadCancel" style="font-size:9px;">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div style="font-size:10px;color:var(--text-muted)" id="cbStatus">No callbacks registered</div>
+      <div id="cbList"></div>
+    </div>
+  </div>
+
+  <!-- Notifications -->
+  <div class="card" id="notifCard" style="display:none">
+    <div class="card-header">
+      Alerts
+      <button class="btn btn-sm" id="btnAddAlert">+ Rule</button>
+    </div>
+    <div class="card-body" id="alertList" style="max-height:200px;overflow-y:auto">
+      <div style="font-size:10px;color:var(--text-muted)">No alerts</div>
+    </div>
+  </div>
+
+</div>
+</div>
+</div>
+
+<!-- ============================================================== -->
+<!-- Modals                                                          -->
+<!-- ============================================================== -->
+
+<!-- Add Recipe Entry -->
+<div class="modal-overlay" id="modalRecipeAdd">
+  <div class="modal">
+    <h3>Add Recipe Entry</h3>
+    <label>Step</label>
+    <input type="number" id="recipeStep" placeholder="100" min="1">
+    <label>Module</label>
+    <select id="recipeModule"><option>opt</option><option>loss</option><option>cb</option><option>tune</option></select>
+    <label>Operation</label>
+    <input type="text" id="recipeOp" placeholder="set_params">
+    <label>Params (JSON)</label>
+    <textarea id="recipeParams" placeholder='{"lr": 0.001}'></textarea>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modalRecipeAdd')">Cancel</button>
+      <button class="btn btn-accent" id="btnRecipeSubmit">Add Entry</button>
+    </div>
+  </div>
+</div>
+
+<!-- Schedule -->
+<div class="modal-overlay" id="modalSchedule">
+  <div class="modal">
+    <h3>Schedule Change</h3>
+    <label>At Step</label>
+    <input type="number" id="schedStep" placeholder="500" min="1">
+    <label>Parameter changes will be applied from current knob values.</label>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modalSchedule')">Cancel</button>
+      <button class="btn btn-accent" id="btnScheduleSubmit">Schedule</button>
+    </div>
+  </div>
+</div>
+
+<!-- Call for Help -->
+<div class="modal-overlay" id="modalCallHelp">
+  <div class="modal">
+    <h3>Call for Help</h3>
+    <p style="font-size:11px;color:var(--text-secondary);margin-bottom:8px">Send a formatted training snapshot:</p>
+    <textarea id="helpMessage" rows="12" readonly style="font-size:10px"></textarea>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modalCallHelp')">Close</button>
+      <button class="btn btn-accent" id="btnCopyHelp">Copy to Clipboard</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Alert Rule -->
+<div class="modal-overlay" id="modalAddAlert">
+  <div class="modal">
+    <h3>Add Alert Rule</h3>
+    <label>Metric</label>
+    <input type="text" id="alertMetric" placeholder="val_loss">
+    <label>Condition</label>
+    <select id="alertCondition">
+      <option value="gt">Greater than</option>
+      <option value="lt">Less than</option>
+      <option value="plateau">Plateau</option>
+      <option value="spike">Spike</option>
+    </select>
+    <label>Threshold</label>
+    <input type="number" id="alertThreshold" step="0.001" placeholder="1.0">
+    <label>Channel</label>
+    <select id="alertChannel"><option value="websocket">WebSocket</option><option value="log">Log</option></select>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('modalAddAlert')">Cancel</button>
+      <button class="btn btn-accent" id="btnAlertSubmit">Add Rule</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================== -->
+<!-- Scripts (order matters: utils -> state -> charts -> ... -> init) -->
+<!-- ============================================================== -->
+<script src="/static/js/utils.js"></script>
+<script src="/static/js/state.js"></script>
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/manifold3d.js"></script>
+<script src="/static/js/controls.js"></script>
+<script src="/static/js/panels.js"></script>
+<script src="/static/js/websocket.js"></script>
+<script src="/static/js/tour.js"></script>
+<script src="/static/js/init.js"></script>
+
+</body>
+</html>

@@ -24,7 +24,21 @@ yaml = ["pyyaml>=6.0"]
 lightning = ["lightning>=2.0"]
 hf = ["transformers>=4.30"]
 tune = ["optuna>=3.0", "pyyaml>=6.0"]
-all = ["pyyaml>=6.0", "lightning>=2.0", "transformers>=4.30", "optuna>=3.0"]
+dashboard = [
+  "fastapi>=0.100",
+  "uvicorn[standard]>=0.20",
+  "websockets>=11.0",
+]
+projections = ["xgboost>=1.7", "numpy>=1.24"]
+manifolds = ["umap-learn>=0.5", "numpy>=1.24"]
+notifications = ["slack_sdk>=3.0"]
+bench = ["matplotlib>=3.5", "pandas>=1.5"]
+cifar = ["torchvision>=0.15"]
+all = [
+  "pyyaml>=6.0", "lightning>=2.0", "transformers>=4.30", "optuna>=3.0",
+  "fastapi>=0.100", "uvicorn[standard]>=0.20", "websockets>=11.0",
+  "xgboost>=1.7", "numpy>=1.24", "umap-learn>=0.5",
+]
 docs = [
   "mkdocs",
   "mkdocs-material",
