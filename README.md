@@ -6,6 +6,14 @@ hotcb lets you modify training behavior **while your run is active** — no rest
 
 Version 2.0 expands the original live-callback system into a full control plane: you can now swap callbacks, tune optimizer parameters, and adjust loss weights — all from another terminal while the model trains.
 
+Now tune hyperparameters in 2 not 2000 runs !!
+
+
+
+https://github.com/user-attachments/assets/2de80dc6-da66-4344-a2fc-8e726d2d9221
+
+
+
 ---
 
 ## What you get
@@ -29,6 +37,20 @@ Plus:
 
 ---
 
+[recipe_and_mutations_with_scheduling](https://github.com/sidphbot/hotcb/blob/master/screens/recipe_and_mutations_with_scheduling.png)
+
+[mutations](https://github.com/sidphbot/hotcb/blob/master/screens/mutations.png)
+
+[mutation_exanpded_impact_log](https://github.com/sidphbot/hotcb/blob/master/screens/mutation_exanpded_impact_log.png)
+
+[automated-ai-free-training-intervention](https://github.com/sidphbot/hotcb/blob/master/screens/automated-ai-free-training-intervention.png)
+
+[comparison_with_mutation_changes](https://github.com/sidphbot/hotcb/blob/master/screens/comparison_with_mutation_changes.png)
+
+[dynamic_manifold_vis](https://github.com/sidphbot/hotcb/blob/master/screens/dynamic_manifold_vis.png)
+
+---
+
 ## Installation
 
 ```bash
@@ -47,7 +69,7 @@ pip install "hotcb[yaml]"
 pip install "hotcb[dashboard]"
 ```
 
-**With AI autopilot (LLM-driven optimization):**
+**With AI autopilot (LLM or Rule driven live optimization - Optionally):**
 
 ```bash
 pip install "hotcb[dashboard,ai]"
