@@ -1,0 +1,2 @@
+import os
+DEFAULT_GUIDELINES_PATH = os.path.join(os.path.dirname(__file__), "default.yaml")

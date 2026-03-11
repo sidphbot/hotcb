@@ -1,0 +1,92 @@
+version: 1
+description: "Built-in community guidelines for common training scenarios"
+rules:
+  - id: plateau_lr_reduce
+    condition: plateau
+    metric: train_loss
+    params:
+      window: 20
+      epsilon: 0.005
+      cooldown: 40
+    action:
+      module: opt
+      op: set_params
+      params:
+        lr_mult: 0.5
+    confidence: high
+    description: "Reduce LR by 50% when train loss plateaus (range <0.005 over 20 steps)"
+
+  - id: val_plateau_lr_reduce
+    condition: plateau
+    metric: val_loss
+    params:
+      window: 20
+      epsilon: 0.005
+      cooldown: 40
+    action:
+      module: opt
+      op: set_params
+      params:
+        lr_mult: 0.5
+    confidence: high
+    description: "Reduce LR by 50% when val loss plateaus (<1% change over 30 steps)"
+
+  - id: spike_emergency_lr
+    condition: divergence
+    metric: train_loss
+    params:
+      window: 5
+      threshold: 0.3
+      cooldown: 30
+    action:
+      module: opt
+      op: set_params
+      params:
+        lr_mult: 0.1
+    confidence: high
+    description: "Emergency LR reduction (10x) if training loss spikes >0.3 in 5 steps"
+
+  - id: divergence_emergency_lr
+    condition: divergence
+    metric: train_loss
+    params:
+      window: 10
+      threshold: 0.5
+      cooldown: 50
+    action:
+      module: opt
+      op: set_params
+      params:
+        lr_mult: 0.1
+    confidence: high
+    description: "Emergency LR reduction (10x) if training loss diverges >0.5 over 10 steps"
+
+  - id: overfitting_wd_increase
+    condition: overfitting
+    metric: val_loss
+    params:
+      ratio_threshold: 0.5
+      train_metric: train_loss
+      val_metric: val_loss
+      cooldown: 50
+    action:
+      module: opt
+      op: set_params
+      params:
+        wd_mult: 2.0
+    confidence: medium
+    description: "Double weight decay when train/val ratio indicates overfitting"
+
+  - id: grad_spike_lr_reduce
+    condition: custom
+    metric: grad_norm
+    params:
+      expression: "grad_norm > 10.0"
+      cooldown: 20
+    action:
+      module: opt
+      op: set_params
+      params:
+        lr_mult: 0.5
+    confidence: medium
+    description: "Halve LR when gradient norm spikes above 10"

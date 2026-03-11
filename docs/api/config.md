@@ -1,6 +1,6 @@
 # Config
 
-`hotcb` supports a **desired-state** config file (YAML) that describes which callbacks should exist,
+`hotcb.modules.cb` supports a **desired-state** config file (YAML) that describes which callbacks should exist,
 their enabled/disabled state, how they should be loaded, and what parameters to apply.
 
 This is complementary to the **imperative command stream** (JSONL) written by the CLI:
@@ -11,7 +11,7 @@ This is complementary to the **imperative command stream** (JSONL) written by th
 
 ## Config module reference
 
-::: hotcb.config
+::: hotcb.modules.cb.config
 
 ---
 
@@ -24,7 +24,7 @@ callbacks:
     enabled: true|false
     target:
       kind: module|python_file
-      path: hotcb.callbacks.timing | /abs/path/to/file.py
+      path: hotcb.modules.cb.callbacks.timing | /abs/path/to/file.py
       symbol: TimingCallback
     init:   # constructor kwargs applied only when the instance is created
       any_kw: any_value
@@ -34,22 +34,21 @@ callbacks:
 
 ## Example config
 
-```
+```yaml
 version: 1
 callbacks:
   timing:
     enabled: true
-    target: { kind: module, path: hotcb.callbacks.timing, symbol: TimingCallback }
+    target: { kind: module, path: hotcb.modules.cb.callbacks.timing, symbol: TimingCallback }
     init: { every: 50, window: 200 }
 
   guard:
     enabled: true
-    target: { kind: module, path: hotcb.callbacks.anomaly_guard, symbol: AnomalyGuardCallback }
+    target: { kind: module, path: hotcb.modules.cb.callbacks.anomaly_guard, symbol: AnomalyGuardCallback }
     init:
       every: 1
       paths: ["loss", "outputs.logits"]
       raise_on_trigger: false
-
 ```
 
 ## Behavior in the controller

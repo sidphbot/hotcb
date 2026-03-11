@@ -4,6 +4,9 @@ build/
 dist/
 *.egg-info/
 .eggs/
-
+.idea/
+.claude/
+lightning_logs/
+data/*
 # (optional) If you use pip editable installs, also ignore:
 pip-wheel-metadata/

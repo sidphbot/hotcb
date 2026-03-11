@@ -2,8 +2,8 @@
 
 ## HuggingFace
 
-::: hotcb.adapters.hf.HotHFCallback
+::: hotcb.modules.cb.adapters.hf.HotHFCallback
 
 ## PyTorch Lightning
 
-::: hotcb.adapters.lightning.HotCallbackController
+::: hotcb.modules.cb.adapters.lightning.HotCallbackController

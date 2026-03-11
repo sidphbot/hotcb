@@ -1,160 +1,57 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
-import pytorch_lightning as pl  # lightning>=2.x
+import pytorch_lightning as pl
 
-from hotcb import HotController
+from hotcb.kernel import HotKernel
+from hotcb.capabilities import TrainingCapabilities, validate_loss_state
 
 
-class HotCallbackController(pl.Callback):
+class HotCBLightning(pl.Callback):
     """
-    PyTorch Lightning adapter for `hotcb`.
+    PyTorch Lightning adapter for hotcb.
 
-    This adapter connects Lightning's callback hooks to the framework-agnostic
-    `HotController`. It enables live hot-updates such as:
+    Connects Lightning hooks to HotKernel, exposing optimizer, scheduler,
+    and loss_state in the env dict for hotopt/hotloss modules.
 
-      - enabling/disabling diagnostics callbacks,
-      - adjusting callback parameters,
-      - loading new callbacks from a module or a Python file path,
+    Multi-optimizer support
+    -----------------------
+    All optimizers from ``trainer.optimizers`` are exposed as
+    ``env["optimizers"]``.  ``env["optimizer"]`` always points to the
+    first one for backward compatibility.  Commands can target a
+    specific optimizer via ``params.opt_idx``.
 
-    without restarting the Trainer.
-
-    Philosophy
-    ----------
-    - Low modification: does not patch Lightning internals.
-    - Safe-point updates: calls `HotController.apply()` only at stable boundaries.
-    - No DDP assumptions: this version does not broadcast config across ranks.
-
-    Hooks used (safe points)
-    ------------------------
-    - `on_fit_start`:
-        One-time event to apply initial config and allow callbacks to initialize
-        resources early.
-
-    - `on_train_batch_end`:
-        Main per-step dispatch point during training.
-
-    - `on_validation_batch_end`:
-        Per-step dispatch point during validation.
-
-    Parameters
-    ----------
-    controller:
-        `HotController` instance that manages callback registry and control plane
-        polling.
-
-        Typical setup:
-
-        >>> controller = HotController(
-        ...     config_path="runs/exp1/hotcb.yaml",
-        ...     commands_path="runs/exp1/hotcb.commands.jsonl",
-        ...     debounce_steps=5,
-        ...     log_path="runs/exp1/hotcb.log",
-        ... )
-
-    train_events:
-        List of event names to dispatch on each `on_train_batch_end`.
-        Defaults to ["train_batch_end"].
-
-        Acceptable values:
-          - any list of strings
-
-        Recommended:
-          - keep them stable across your project for config-driven callbacks.
-
-    val_events:
-        List of event names to dispatch on each `on_validation_batch_end`.
-        Defaults to ["val_batch_end"].
-
-    Environment (`env`) contract
-    ----------------------------
-    The adapter constructs an `env` dict including:
-
-      - "framework": "lightning"
-      - "phase": "fit_start" | "train" | "val"
-      - "step": int trainer.global_step
-      - "epoch": int trainer.current_epoch
-      - "model": pl.LightningModule (pl_module)
-      - "trainer": pl.Trainer
-      - "log": callable(str) -> None (uses trainer.print when available)
-
-    Plus hook-specific fields via **extra:
-      - "outputs": hook outputs
-      - "batch": current batch
-      - "batch_idx": int
-      - "dataloader_idx": int (validation hook)
-
-    Best practice: `loss` exposure (optional)
-    ----------------------------------------
-    Many diagnostics callbacks (TensorStats / JSONLLogger / AnomalyGuard) benefit
-    from a consistent `env["loss"]` key. Lightning's `outputs` may be:
-      - a Tensor loss,
-      - a dict containing "loss",
-      - or None depending on your training_step.
-
-    This adapter does not enforce a single convention, but you can optionally
-    normalize loss by setting env["loss"] if you want (see below).
-
-    Example usage
-    -------------
-    >>> from hotcb.adapters.lightning import HotCallbackController
-    >>> trainer = pl.Trainer(callbacks=[HotCallbackController(controller)])
-    >>> trainer.fit(model, datamodule=dm)
-
-    Live control from another terminal:
-    >>> hotcb --dir runs/exp1 enable tstats
-    >>> hotcb --dir runs/exp1 set tstats every=20 paths=loss,outputs.logits
-    >>> hotcb --dir runs/exp1 load my_diag --file /tmp/my_diag.py --symbol MyDiag --enabled --init msg="hi"
+    Grad accumulation
+    -----------------
+    When accumulation is active, micro-steps (where no optimizer step
+    occurs) are tagged with ``env["is_accumulation_step"] = True``.
+    The kernel skips metric collection on those steps to avoid noisy
+    intermediate values.  Commands still apply immediately.
     """
 
     def __init__(
         self,
-        controller: HotController,
+        kernel: HotKernel,
         train_events: Optional[List[str]] = None,
         val_events: Optional[List[str]] = None,
+        loss_state: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """
-        Create a Lightning adapter callback.
-
-        Parameters
-        ----------
-        controller:
-            HotController instance used to apply updates and dispatch events.
-
-        train_events:
-            Event names dispatched during training at `on_train_batch_end`.
-            If None, defaults to ["train_batch_end"].
-
-        val_events:
-            Event names dispatched during validation at `on_validation_batch_end`.
-            If None, defaults to ["val_batch_end"].
-        """
         super().__init__()
-        self.controller = controller
+        self.kernel = kernel
         self.train_events = train_events or ["train_batch_end"]
         self.val_events = val_events or ["val_batch_end"]
+        self._loss_state = loss_state
+        self._capabilities: Optional[TrainingCapabilities] = None
+
+    # -- lifecycle hooks ---------------------------------------------------
 
     def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """
-        Lightning hook: called when fit begins.
-
-        Use cases
-        ---------
-        - Load/enable initial diagnostics callbacks before the first step.
-        - Create artifact directories.
-        - Emit a "fit_start" event to your hot callbacks.
-
-        Parameters
-        ----------
-        trainer:
-            Lightning Trainer instance.
-
-        pl_module:
-            LightningModule being trained.
-        """
+        self._capabilities = self._detect_capabilities(trainer, pl_module)
+        if self.kernel.run_dir:
+            self._capabilities.save(self.kernel.run_dir)
         env = self._env(trainer, pl_module, phase="fit_start")
-        self.controller.apply(env, events=["fit_start"])
+        self.kernel.apply(env, events=["fit_start"])
 
     def on_train_batch_end(
         self,
@@ -164,53 +61,8 @@ class HotCallbackController(pl.Callback):
         batch: Any,
         batch_idx: int,
     ) -> None:
-        """
-        Lightning hook: called at the end of a training batch.
-
-        This is the primary safe point for hot updates during training. It is
-        invoked after the training step is computed and logged.
-
-        Behavior
-        --------
-        - Builds env with phase="train" and includes outputs, batch, batch_idx.
-        - Calls controller.apply(env, events=self.train_events).
-
-        Parameters
-        ----------
-        trainer:
-            Lightning Trainer.
-
-        pl_module:
-            LightningModule.
-
-        outputs:
-            Output from `training_step`. Common patterns:
-              - loss tensor
-              - dict with "loss" and other entries
-              - None
-
-        batch:
-            Current batch as yielded by dataloader.
-
-        batch_idx:
-            Batch index within the epoch.
-
-        Notes
-        -----
-        If you want to normalize loss for diagnostics callbacks, you can do:
-          - if torch Tensor: env["loss"] = outputs
-          - if dict and "loss" in outputs: env["loss"] = outputs["loss"]
-        (Not required, but recommended.)
-        """
-        env = self._env(
-            trainer,
-            pl_module,
-            phase="train",
-            outputs=outputs,
-            batch=batch,
-            batch_idx=batch_idx,
-        )
-        self.controller.apply(env, events=self.train_events)
+        env = self._env(trainer, pl_module, phase="train", outputs=outputs, batch=batch, batch_idx=batch_idx)
+        self.kernel.apply(env, events=self.train_events)
 
     def on_validation_batch_end(
         self,
@@ -221,97 +73,100 @@ class HotCallbackController(pl.Callback):
         batch_idx: int,
         dataloader_idx: int = 0,
     ) -> None:
-        """
-        Lightning hook: called at the end of a validation batch.
+        env = self._env(trainer, pl_module, phase="val", outputs=outputs, batch=batch, batch_idx=batch_idx, dataloader_idx=dataloader_idx)
+        self.kernel.apply(env, events=self.val_events)
 
-        This is a safe point for diagnostics during validation, such as:
-          - logging tensor stats on outputs,
-          - writing artifacts,
-          - monitoring evaluation stability.
+    def on_validation_epoch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> None:
+        env = self._env(trainer, pl_module, phase="val")
+        self.kernel.apply(env, events=["val_epoch_end"])
 
-        Behavior
-        --------
-        - Builds env with phase="val" and includes outputs/batch/batch_idx/dataloader_idx.
-        - Calls controller.apply(env, events=self.val_events).
+    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        env = self._env(trainer, pl_module, phase="fit_end")
+        self.kernel.apply(env, events=["run_end"])
+        self.kernel.close(env)
 
-        Parameters
-        ----------
-        trainer:
-            Lightning Trainer.
+    # -- capabilities detection --------------------------------------------
 
-        pl_module:
-            LightningModule.
+    def _detect_capabilities(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+    ) -> TrainingCapabilities:
+        """Build a TrainingCapabilities snapshot from the current setup."""
+        # Optimizers
+        opt_names: list[str] = []
+        group_counts: list[int] = []
+        try:
+            optimizers = trainer.optimizers or []
+            for opt in optimizers:
+                opt_names.append(type(opt).__name__)
+                group_counts.append(len(opt.param_groups))
+        except Exception:
+            pass
 
-        outputs:
-            Output from `validation_step`.
+        # Schedulers
+        sched_types: list[str] = []
+        has_scheduler = False
+        try:
+            configs = trainer.lr_scheduler_configs or []
+            for cfg in configs:
+                has_scheduler = True
+                sched_types.append(type(cfg.scheduler).__name__)
+        except Exception:
+            pass
 
-        batch:
-            Current batch.
+        # Grad accumulation
+        accum = 1
+        auto_opt = getattr(pl_module, "automatic_optimization", True)
+        try:
+            accum = getattr(trainer, "accumulate_grad_batches", 1) or 1
+        except Exception:
+            pass
+        # For manual optimization, check module attribute
+        if not auto_opt and accum == 1:
+            accum = getattr(pl_module, "_grad_accum", 1) or 1
 
-        batch_idx:
-            Validation batch index.
+        # Loss state
+        ls_detected = False
+        ls_keys: list[str] = []
+        ls = self._resolve_loss_state(pl_module)
+        if ls is not None:
+            ls_detected = True
+            weights = ls.get("weights", {})
+            ls_keys = list(weights.keys())
 
-        dataloader_idx:
-            Index of validation dataloader (for multiple val loaders).
+        # Grad clip
+        clip_val = None
+        clip_wired = False
+        try:
+            if hasattr(trainer, "gradient_clip_val") and trainer.gradient_clip_val:
+                clip_val = float(trainer.gradient_clip_val)
+                clip_wired = auto_opt  # only wired if Lightning manages the loop
+        except Exception:
+            pass
 
-        Notes
-        -----
-        Similar to training, you may normalize env["loss"] from outputs if your
-        validation_step returns loss.
-        """
-        env = self._env(
-            trainer,
-            pl_module,
-            phase="val",
-            outputs=outputs,
-            batch=batch,
-            batch_idx=batch_idx,
-            dataloader_idx=dataloader_idx,
+        return TrainingCapabilities(
+            framework="lightning",
+            num_optimizers=len(opt_names) or 1,
+            optimizer_names=tuple(opt_names),
+            num_param_groups=tuple(group_counts),
+            has_scheduler=has_scheduler,
+            scheduler_types=tuple(sched_types),
+            grad_accumulation_steps=accum,
+            automatic_optimization=auto_opt,
+            loss_state_detected=ls_detected,
+            loss_state_keys=tuple(ls_keys),
+            grad_clip_value=clip_val,
+            grad_clip_wired=clip_wired,
         )
-        self.controller.apply(env, events=self.val_events)
+
+    # -- env builder -------------------------------------------------------
 
     def _env(self, trainer: pl.Trainer, pl_module: pl.LightningModule, phase: str, **extra: Any) -> Dict[str, Any]:
-        """
-        Construct a framework-agnostic env dict for Lightning.
-
-        Parameters
-        ----------
-        trainer:
-            Lightning Trainer instance.
-
-        pl_module:
-            LightningModule instance.
-
-        phase:
-            Lifecycle phase string. Values used by this adapter:
-              - "fit_start"
-              - "train"
-              - "val"
-
-        **extra:
-            Additional fields to merge into env. Common extras (by hook):
-              - outputs: Any
-              - batch: Any
-              - batch_idx: int
-              - dataloader_idx: int
-
-            If keys collide with base env keys, extras overwrite base keys.
-
-        Returns
-        -------
-        Dict[str, Any]
-            Environment dictionary for hot callbacks.
-
-        Logging behavior
-        ----------------
-        env["log"] uses `trainer.print` if available (preferred in Lightning),
-        falling back to built-in print otherwise.
-
-        Notes on step/epoch
-        -------------------
-        - step is derived from trainer.global_step (int), defaulting to 0.
-        - epoch is derived from trainer.current_epoch (int), defaulting to 0.
-        """
         def _log(s: str) -> None:
             try:
                 trainer.print(s)
@@ -328,16 +183,142 @@ class HotCallbackController(pl.Callback):
             "log": _log,
         }
 
+        env["kernel"] = self.kernel
+
+        if self._capabilities is not None:
+            env["capabilities"] = self._capabilities
+
+        # -- metric accessor (for hottune and MetricsCollector strategy 1) --
+        def _metric(name: str, default: Any = None) -> Any:
+            # Check callback metrics first
+            try:
+                cb_metrics = trainer.callback_metrics
+                if name in cb_metrics:
+                    val = cb_metrics[name]
+                    try:
+                        import torch
+                        if isinstance(val, torch.Tensor):
+                            return val.item()
+                    except ImportError:
+                        pass
+                    return val
+            except Exception:
+                pass
+            # Check logged metrics
+            try:
+                logged = trainer.logged_metrics
+                if name in logged:
+                    val = logged[name]
+                    try:
+                        import torch
+                        if isinstance(val, torch.Tensor):
+                            return val.item()
+                    except ImportError:
+                        pass
+                    return val
+            except Exception:
+                pass
+            # Normalized env fields
+            if name == "lr":
+                opt = env.get("optimizer")
+                if opt is not None:
+                    try:
+                        return opt.param_groups[0]["lr"]
+                    except Exception:
+                        pass
+            if name in ("train/loss", "loss"):
+                loss = env.get("loss")
+                if loss is not None:
+                    try:
+                        import torch
+                        if isinstance(loss, torch.Tensor):
+                            return loss.item()
+                    except ImportError:
+                        pass
+                    return loss
+            return default
+
+        env["metric"] = _metric
+
+        # -- max_steps for phase binning --
+        try:
+            if hasattr(trainer, "max_steps") and trainer.max_steps and trainer.max_steps > 0:
+                env["max_steps"] = trainer.max_steps
+            elif hasattr(trainer, "estimated_stepping_batches"):
+                env["max_steps"] = int(trainer.estimated_stepping_batches)
+        except Exception:
+            pass
+
+        # -- all optimizers (multi-optimizer support) --
+        try:
+            optimizers = trainer.optimizers
+            if optimizers:
+                env["optimizer"] = optimizers[0]  # backward compat default
+                env["optimizers"] = list(optimizers)
+        except Exception:
+            pass
+
+        # -- all schedulers --
+        try:
+            configs = trainer.lr_scheduler_configs
+            if configs:
+                env["scheduler"] = configs[0].scheduler
+                env["schedulers"] = [cfg.scheduler for cfg in configs]
+        except Exception:
+            pass
+
+        # -- loss_state (explicit > auto-detected from pl_module) --
+        ls = self._resolve_loss_state(pl_module)
+        if ls is not None:
+            env["loss_state"] = ls
+
+        # -- grad accumulation detection --
+        batch_idx = extra.get("batch_idx")
+        accum = 1
+        if self._capabilities:
+            accum = self._capabilities.grad_accumulation_steps
+        else:
+            try:
+                accum = getattr(trainer, "accumulate_grad_batches", 1) or 1
+            except Exception:
+                pass
+
+        if accum > 1 and batch_idx is not None:
+            is_accum_step = (batch_idx + 1) % accum != 0
+            env["is_accumulation_step"] = is_accum_step
+            env["grad_accumulation_steps"] = accum
+
+        # -- all logged/callback metrics as dict (for MetricsCollector discovery) --
+        try:
+            all_metrics: Dict[str, float] = {}
+            import torch
+            cb_metrics = trainer.callback_metrics
+            if cb_metrics:
+                for k, v in cb_metrics.items():
+                    try:
+                        all_metrics[k] = v.item() if isinstance(v, torch.Tensor) else float(v)
+                    except (TypeError, ValueError):
+                        pass
+            logged = trainer.logged_metrics
+            if logged:
+                for k, v in logged.items():
+                    if k not in all_metrics:
+                        try:
+                            all_metrics[k] = v.item() if isinstance(v, torch.Tensor) else float(v)
+                        except (TypeError, ValueError):
+                            pass
+            if all_metrics:
+                env["metrics"] = all_metrics
+        except Exception:
+            pass
+
         env.update(extra)
 
-        # OPTIONAL (docstring-aligned QoL):
-        # If training_step returns a loss tensor or dict with loss, expose env["loss"].
-        # This is safe and helps generic diagnostics callbacks.
+        # -- normalize loss from outputs --
         try:
             outputs = env.get("outputs")
             if "loss" not in env:
-                # loss tensor
-                import torch  # optional dependency in Lightning projects anyway
+                import torch
                 if isinstance(outputs, torch.Tensor):
                     env["loss"] = outputs
                 elif isinstance(outputs, dict) and "loss" in outputs:
@@ -346,3 +327,20 @@ class HotCallbackController(pl.Callback):
             pass
 
         return env
+
+    # -- helpers -----------------------------------------------------------
+
+    def _resolve_loss_state(self, pl_module: pl.LightningModule) -> Optional[Dict[str, Any]]:
+        """Resolve loss_state: explicit > pl_module attribute."""
+        if self._loss_state is not None:
+            valid, normalized = validate_loss_state(self._loss_state)
+            if valid:
+                return normalized if normalized is not self._loss_state else self._loss_state
+
+        if hasattr(pl_module, "loss_state"):
+            obj = pl_module.loss_state
+            valid, _ = validate_loss_state(obj)
+            if valid:
+                return obj  # return original ref so mutations are visible
+
+        return None

@@ -1,0 +1,41 @@
+# hotcb AI Autopilot — System Prompt Configuration
+#
+# This file customizes the AI autopilot behavior.
+# Edit to tune the LLM's decision-making style.
+# Loaded at engine init; overridable via API.
+
+# Personality / style overrides (appended to system prompt)
+style_notes: |
+  - Be conservative: when in doubt, do nothing.
+  - Prefer small, reversible changes over large ones.
+  - Always explain your reasoning with specific metric values.
+
+# Default key metric if not set elsewhere
+default_key_metric: val_loss
+
+# Default watch metrics
+default_watch_metrics:
+  - grad_norm
+  - lr
+
+# Cadence defaults
+default_cadence: 50          # steps between periodic checks
+min_cooldown: 10             # minimum steps between any two AI calls
+
+# Budget
+default_budget_cap: 5.0      # USD
+
+# Multi-run
+default_max_runs: 3
+
+# Action constraints (override ACTION_SCHEMA bounds)
+action_bounds:
+  set_lr:
+    min: 1.0e-7
+    max: 0.1
+  reduce_lr_factor:
+    min: 0.1
+    max: 0.9
+  set_wd:
+    min: 0.0
+    max: 0.1
