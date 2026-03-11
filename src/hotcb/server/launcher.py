@@ -178,7 +178,13 @@ class TrainingLauncher:
         seed: Optional[int] = None,
     ) -> dict:
         if self.running:
-            return {"error": "Training already running"}
+            # Try to wait a moment for a winding-down thread
+            if self._stop_event.is_set() and self._thread is not None:
+                self._thread.join(timeout=3)
+                if not self._thread.is_alive():
+                    self._thread = None
+            if self.running:
+                return {"error": "Training already running"}
 
         cfg = self._configs.get(config_id)
         if cfg is None:
@@ -314,17 +320,22 @@ class TrainingLauncher:
 
     def stop(self) -> dict:
         if not self.running:
-            return {"stopped": False, "error": "No training running"}
+            return {"stopped": True, "was_running": False}
         log.info("[hotcb.launcher] stopping training thread")
         self._stop_event.set()
-        self._thread.join(timeout=2)
+        self._thread.join(timeout=5)
         still_alive = self._thread.is_alive()
+        if not still_alive:
+            self._thread = None
         return {"stopped": not still_alive}
 
     def reset(self) -> dict:
         """Stop training and wipe all JSONL files in run_dir."""
         if self.running:
             self.stop()
+        # Ensure thread reference is cleared even if join timed out
+        if self._thread is not None and not self._thread.is_alive():
+            self._thread = None
 
         rd = self._active_run_dir or self._run_dir
         cleared = []

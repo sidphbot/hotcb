@@ -274,7 +274,8 @@ intervene by adjusting hyperparameters, loss weights, or callbacks.
 - Only intervene when there's clear evidence of a problem or opportunity.
 
 ## Key Metric
-The key metric is the primary optimization target: **{key_metric}**
+The key metric is the primary optimization target: **{key_metric}** (goal: **{key_metric_direction}**)
+{key_metric_direction_hint}
 You can change it via the "set_key_metric" action if you believe a different
 metric is more informative at this stage of training.
 
@@ -395,8 +396,24 @@ def build_context(
     else:
         carried_ctx_full = carried_context
 
+    # Resolve metric direction
+    key_metric_mode = ai_state.get("key_metric_mode", "auto")
+    if key_metric_mode in ("min", "max"):
+        resolved_dir = key_metric_mode
+    else:
+        from .ai_engine import infer_metric_direction
+        resolved_dir = infer_metric_direction(key_metric)
+
+    dir_label = "minimize" if resolved_dir == "min" else "maximize"
+    if resolved_dir == "min":
+        dir_hint = "Lower values are better. A decreasing trend means improvement."
+    else:
+        dir_hint = "Higher values are better. An increasing trend means improvement."
+
     system = SYSTEM_PROMPT.format(
         key_metric=key_metric,
+        key_metric_direction=dir_label,
+        key_metric_direction_hint=dir_hint,
         watch_metrics=", ".join(watch_metrics) if watch_metrics else "none",
         run_number=run_number,
         max_runs=max_runs,

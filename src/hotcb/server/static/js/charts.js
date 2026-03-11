@@ -182,11 +182,12 @@ function computeImpactSummary(rec) {
     var slopeAfter = _linregSlope(afterPts);
     var trendDiff = slopeAfter - slopeBefore;
 
-    // For metrics containing "loss" or "error", decrease is improvement
-    var isLossLike = /loss|error|diverge/i.test(name);
-    var improving = isLossLike ? change < 0 : change > 0;
-    // Trend improvement: for loss-like, a more negative slope after is good
-    var trendImproving = isLossLike ? trendDiff < 0 : trendDiff > 0;
+    // Use direction inference to determine if change is improvement
+    var dir = (typeof inferMetricDirection === 'function') ? inferMetricDirection(name) : (/loss|error|diverge/i.test(name) ? 'min' : 'max');
+    var isMinimize = (dir === 'min');
+    var improving = isMinimize ? change < 0 : change > 0;
+    // Trend improvement: for minimize, a more negative slope after is good
+    var trendImproving = isMinimize ? trendDiff < 0 : trendDiff > 0;
 
     results.push({
       metric: name,
@@ -695,13 +696,16 @@ function createMetricCard(name) {
     focusMetricCard(name);
   });
   card.querySelector('.metric-card-key').addEventListener('click', function() {
-    if (confirm('Set "' + name + '" as the key metric for autopilot optimization?')) {
-      api('POST', '/api/autopilot/ai/key_metric', {metric: name}).then(function(res) {
+    var dir = (typeof inferMetricDirection === 'function') ? inferMetricDirection(name) : 'min';
+    var dirLabel = (dir === 'min') ? 'minimize (lower=better)' : 'maximize (higher=better)';
+    if (confirm('Set "' + name + '" as the key metric?\nDetected direction: ' + dirLabel + '\n\nYou can change the direction in the AI config panel.')) {
+      api('POST', '/api/autopilot/ai/key_metric', {metric: name, mode: 'auto'}).then(function(res) {
         if (res && res.status === 'updated') {
-          // Update AI key metric dropdown if it exists
           var keyMetricEl = document.getElementById('aiKeyMetric');
           if (keyMetricEl) keyMetricEl.value = name;
-          // Visual feedback — highlight the star
+          var modeEl = document.getElementById('aiKeyMetricMode');
+          if (modeEl) modeEl.value = res.mode || 'auto';
+          // Visual feedback
           var stars = document.querySelectorAll('.metric-card-key');
           stars.forEach(function(s) { s.style.color = 'var(--yellow,#facc15)'; s.style.fontWeight = ''; });
           var thisCard = card.querySelector('.metric-card-key');

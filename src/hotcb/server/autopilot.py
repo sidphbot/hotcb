@@ -834,6 +834,7 @@ def create_router(engine: Optional[AutopilotEngine] = None, ai_engine: Any = Non
 
     class KeyMetricRequest(BaseModel):
         metric: str
+        mode: Optional[str] = None  # "auto", "min", or "max"
 
     @router.post("/ai/key_metric")
     async def ai_set_key_metric(body: KeyMetricRequest):
@@ -841,21 +842,25 @@ def create_router(engine: Optional[AutopilotEngine] = None, ai_engine: Any = Non
 
         Allows setting any metric name — the metric doesn't need to be
         in the stream yet (it might appear in future steps).
+        Optional ``mode`` sets direction: "min", "max", or "auto" (inferred).
         """
         if _ai_engine is None:
             return JSONResponse(status_code=400, content={"error": "AI engine not configured"})
-        # Allow setting any metric name — don't require it to exist in
-        # the stream yet (it may appear after a val epoch, or the user
-        # knows it will appear from their training code)
         available = list(_engine._metric_history.keys()) if _engine else []
-        # Try the strict path first; fall back to force-set
         ok = _ai_engine.handle_set_key_metric(body.metric, available)
         if not ok:
-            # Force-set: the user explicitly asked for this metric
             _ai_engine.state.key_metric = body.metric
-            _ai_engine.save_state()
             log.info("[hotcb.autopilot] key metric force-set to: %s", body.metric)
-        return {"status": "updated", "key_metric": body.metric}
+        # Set direction mode if provided
+        if body.mode and body.mode in ("auto", "min", "max"):
+            _ai_engine.state.key_metric_mode = body.mode
+        _ai_engine.save_state()
+        return {
+            "status": "updated",
+            "key_metric": body.metric,
+            "mode": _ai_engine.state.key_metric_mode,
+            "resolved_direction": _ai_engine.state.resolved_direction,
+        }
 
     @router.get("/ai/state")
     async def ai_state():

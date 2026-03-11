@@ -193,11 +193,20 @@ function initControls() {
   });
   setInterval(pollAutopilotStatus, 3000);
 
-  // AI key metric dropdown
+  // AI key metric dropdown + direction mode
   var aiKeyMetricEl = document.getElementById('aiKeyMetric');
+  var aiKeyMetricModeEl = document.getElementById('aiKeyMetricMode');
   if (aiKeyMetricEl) {
     aiKeyMetricEl.addEventListener('change', async function(e) {
-      await api('POST', '/api/autopilot/ai/key_metric', {metric: e.target.value});
+      var mode = aiKeyMetricModeEl ? aiKeyMetricModeEl.value : 'auto';
+      await api('POST', '/api/autopilot/ai/key_metric', {metric: e.target.value, mode: mode});
+      pollAIStatus();
+    });
+  }
+  if (aiKeyMetricModeEl) {
+    aiKeyMetricModeEl.addEventListener('change', async function(e) {
+      var metric = aiKeyMetricEl ? aiKeyMetricEl.value : 'val_loss';
+      await api('POST', '/api/autopilot/ai/key_metric', {metric: metric, mode: e.target.value});
       pollAIStatus();
     });
   }
@@ -276,18 +285,23 @@ function initControls() {
     var res = await api('POST', '/api/train/start', startBody);
     if (res && !res.error) {
       pollTrainStatus();
+    } else if (res && res.error) {
+      alert('Failed to start training: ' + res.error);
+      pollTrainStatus();
     }
   });
   $('#btnTrainStop').addEventListener('click', async function() {
     var btn = $('#btnTrainStop');
     btn.disabled = true;
     btn.textContent = 'Stopping...';
-    await api('POST', '/api/train/stop');
-    pollTrainStatus();
+    var res = await api('POST', '/api/train/stop');
+    // Poll status after a brief delay to let the thread wind down
     setTimeout(function() {
-      btn.disabled = false;
+      pollTrainStatus();
       btn.textContent = 'Stop';
-    }, 1000);
+    }, 500);
+    // Second poll to catch slower shutdowns
+    setTimeout(pollTrainStatus, 2000);
   });
   $('#btnTrainReset').addEventListener('click', async function() {
     if (!confirm('Reset will stop training and clear all data. Continue?')) return;
@@ -426,24 +440,61 @@ function setTheme(theme) {
   }
 }
 
+/**
+ * Infer whether a metric should be minimized or maximized from its name.
+ * Mirrors the server-side infer_metric_direction().
+ */
+function inferMetricDirection(name) {
+  var low = name.toLowerCase();
+  var minPats = ['loss', 'error', 'err', 'perplexity', 'ppl', 'mse', 'mae', 'rmse',
+                 'cer', 'wer', 'fid', 'divergence', 'regret', 'cost'];
+  var maxPats = ['accuracy', 'acc', 'f1', 'auc', 'auroc', 'recall', 'precision',
+                 'score', 'bleu', 'rouge', 'meteor', 'iou', 'dice', 'map',
+                 'reward', 'return', 'r2', 'correlation', 'similarity',
+                 'alignment', 'coherence', 'fluency'];
+  for (var i = 0; i < minPats.length; i++) { if (low.indexOf(minPats[i]) >= 0) return 'min'; }
+  for (var i = 0; i < maxPats.length; i++) { if (low.indexOf(maxPats[i]) >= 0) return 'max'; }
+  return 'min';  // default
+}
+
 function computeHealth() {
+  // Try to find a primary metric: prefer train_loss, then any loss, then first metric
   var lossData = S.metricsData['train_loss'] || S.metricsData['loss'] || [];
+  var primaryMetric = 'train_loss';
+  var primaryDir = 'min';
+  if (!lossData.length) {
+    // Fall back to first available metric
+    var names = Object.keys(S.metricsData);
+    for (var i = 0; i < names.length; i++) {
+      if (S.metricsData[names[i]].length >= 5) {
+        lossData = S.metricsData[names[i]];
+        primaryMetric = names[i];
+        primaryDir = inferMetricDirection(names[i]);
+        break;
+      }
+    }
+  }
   if (lossData.length < 5) { setHealth(50, 'Insufficient data'); return; }
-  var recent = lossData.slice(-30);  // larger window for trend
+  var recent = lossData.slice(-30);
   var first = recent[0].value;
   var last = recent[recent.length - 1].value;
   var trend = (last - first) / Math.max(Math.abs(first), 1e-8);
 
+  // Flip trend for maximize metrics (positive trend = improvement)
+  var effectiveTrend = (primaryDir === 'max') ? -trend : trend;
+
   var rawScore = 70;
-  if (trend < -0.05) rawScore = 90;
-  else if (trend < 0) rawScore = 80;
-  else if (trend < 0.05) rawScore = 60;
-  else if (trend < 0.2) rawScore = 40;
+  if (effectiveTrend < -0.05) rawScore = 90;
+  else if (effectiveTrend < 0) rawScore = 80;
+  else if (effectiveTrend < 0.05) rawScore = 60;
+  else if (effectiveTrend < 0.2) rawScore = 40;
   else rawScore = 20;
 
-  var valLoss = S.metricsData['val_loss'];
-  if (valLoss && valLoss.length >= 3) {
-    var vRecent = valLoss.slice(-5);
+  // Check for overfitting via val metric
+  var valMetric = S.metricsData['val_loss'] || S.metricsData['val_error'];
+  if (valMetric && valMetric.length >= 3) {
+    var vRecent = valMetric.slice(-5);
+    // For minimize metrics, val going up is bad
     if (vRecent[vRecent.length-1].value > vRecent[0].value * 1.2) rawScore = Math.min(rawScore, 35);
   }
 
@@ -650,6 +701,11 @@ async function pollAIStatus() {
           keyMetricEl.appendChild(opt);
         });
         keyMetricEl.value = res.key_metric || currentVal || 'val_loss';
+      }
+      // Sync direction mode
+      var modeEl = document.getElementById('aiKeyMetricMode');
+      if (modeEl && res.key_metric_mode) {
+        modeEl.value = res.key_metric_mode;
       }
     }
 

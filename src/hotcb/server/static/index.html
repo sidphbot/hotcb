@@ -407,6 +407,11 @@
         <select id="aiKeyMetric" style="flex:1;font-size:9px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:3px;">
           <option value="val_loss">val_loss</option>
         </select>
+        <select id="aiKeyMetricMode" style="width:52px;font-size:9px;padding:2px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:3px;" title="Metric direction: lower-is-better or higher-is-better">
+          <option value="auto">auto</option>
+          <option value="min">min ↓</option>
+          <option value="max">max ↑</option>
+        </select>
       </div>
       <div style="display:flex;gap:8px;font-size:9px;font-family:var(--font-mono);color:var(--text-muted);margin-bottom:4px;">
         <span id="aiCostInfo">$0.0000 / $5.00</span>

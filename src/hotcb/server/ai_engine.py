@@ -54,6 +54,7 @@ class AIState:
     """Persisted in ``hotcb.ai.state.json`` across runs."""
 
     key_metric: str = "val_loss"
+    key_metric_mode: str = "auto"  # "auto", "min", or "max"
     watch_metrics: List[str] = field(default_factory=list)
     run_number: int = 1
     max_runs: int = 3
@@ -67,10 +68,18 @@ class AIState:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @property
+    def resolved_direction(self) -> str:
+        """Return 'min' or 'max' — resolves 'auto' from the metric name."""
+        if self.key_metric_mode in ("min", "max"):
+            return self.key_metric_mode
+        return infer_metric_direction(self.key_metric)
+
     @classmethod
     def from_dict(cls, data: dict) -> "AIState":
         return cls(
             key_metric=data.get("key_metric", "val_loss"),
+            key_metric_mode=data.get("key_metric_mode", "auto"),
             watch_metrics=data.get("watch_metrics", []),
             run_number=data.get("run_number", 1),
             max_runs=data.get("max_runs", 3),
@@ -80,6 +89,34 @@ class AIState:
             cadence_override=data.get("cadence_override"),
             watch_metrics_raw=data.get("watch_metrics_raw", []),
         )
+
+
+def infer_metric_direction(name: str) -> str:
+    """Infer whether a metric should be minimized or maximized from its name.
+
+    Returns ``"min"`` or ``"max"``.
+    """
+    low = name.lower()
+    # Patterns that clearly mean "lower is better"
+    _MIN_PATTERNS = (
+        "loss", "error", "err", "perplexity", "ppl", "mse", "mae", "rmse",
+        "cer", "wer", "fid", "divergence", "regret", "cost",
+    )
+    # Patterns that clearly mean "higher is better"
+    _MAX_PATTERNS = (
+        "accuracy", "acc", "f1", "auc", "auroc", "recall", "precision",
+        "score", "bleu", "rouge", "meteor", "iou", "dice", "map",
+        "reward", "return", "r2", "correlation", "similarity",
+        "alignment", "coherence", "fluency",
+    )
+    for pat in _MIN_PATTERNS:
+        if pat in low:
+            return "min"
+    for pat in _MAX_PATTERNS:
+        if pat in low:
+            return "max"
+    # Default: assume minimization (most common in ML)
+    return "min"
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +506,8 @@ class LLMAutopilotEngine:
                 max(0, self.config.budget_cap - self._total_cost), 4
             ),
             "key_metric": self.state.key_metric,
+            "key_metric_mode": self.state.key_metric_mode,
+            "key_metric_direction": self.state.resolved_direction,
             "watch_metrics": self.state.watch_metrics,
             "run_number": self.state.run_number,
             "max_runs": self.state.max_runs,
