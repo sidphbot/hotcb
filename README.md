@@ -37,17 +37,17 @@ Plus:
 
 ---
 
-[recipe_and_mutations_with_scheduling](https://github.com/sidphbot/hotcb/blob/master/screens/recipe_and_mutations_with_scheduling.png)
+![recipe_and_mutations_with_scheduling](https://github.com/sidphbot/hotcb/blob/master/screens/recipe_and_mutations_with_scheduling.png)
 
-[mutations](https://github.com/sidphbot/hotcb/blob/master/screens/mutations.png)
+![mutations](https://github.com/sidphbot/hotcb/blob/master/screens/mutations.png)
 
-[mutation_exanpded_impact_log](https://github.com/sidphbot/hotcb/blob/master/screens/mutation_exanpded_impact_log.png)
+![mutation_exanpded_impact_log](https://github.com/sidphbot/hotcb/blob/master/screens/mutation_exanpded_impact_log.png)
 
-[automated-ai-free-training-intervention](https://github.com/sidphbot/hotcb/blob/master/screens/automated-ai-free-training-intervention.png)
+![automated-ai-free-training-intervention](https://github.com/sidphbot/hotcb/blob/master/screens/automated-ai-free-training-intervention.png)
 
-[comparison_with_mutation_changes](https://github.com/sidphbot/hotcb/blob/master/screens/comparison_with_mutation_changes.png)
+![comparison_with_mutation_changes](https://github.com/sidphbot/hotcb/blob/master/screens/comparison_with_mutation_changes.png)
 
-[dynamic_manifold_vis](https://github.com/sidphbot/hotcb/blob/master/screens/dynamic_manifold_vis.png)
+![dynamic_manifold_vis](https://github.com/sidphbot/hotcb/blob/master/screens/dynamic_manifold_vis.png)
 
 ---
 
