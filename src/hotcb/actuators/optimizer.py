@@ -10,6 +10,12 @@ class OptimizerActuator:
     Actuator for live optimizer parameter mutations.
 
     Supports: lr_mult, lr_set, wd_mult, wd_set, betas_set.
+
+    Multi-optimizer support
+    -----------------------
+    ``snapshot`` and ``restore`` capture/restore all optimizers in
+    ``env["optimizers"]``.  ``apply`` targets a specific optimizer via
+    ``patch["opt_idx"]`` (default 0).
     """
 
     name: str = "opt"
@@ -22,10 +28,14 @@ class OptimizerActuator:
         self.lr_bounds = lr_bounds
         self.wd_bounds = wd_bounds
 
-    def _resolve_optimizer(self, env: dict):
-        opt = env.get("optimizer")
-        if opt is not None:
-            return opt
+    def _resolve_optimizer(self, env: dict, opt_idx: int = 0):
+        optimizers = env.get("optimizers")
+        if isinstance(optimizers, (list, tuple)) and 0 <= opt_idx < len(optimizers):
+            return optimizers[opt_idx]
+        if opt_idx == 0:
+            opt = env.get("optimizer")
+            if opt is not None:
+                return opt
         resolver = env.get("resolve_optimizer")
         if callable(resolver):
             try:
@@ -34,19 +44,32 @@ class OptimizerActuator:
                 return None
         return None
 
+    def _resolve_all_optimizers(self, env: dict) -> list:
+        optimizers = env.get("optimizers")
+        if isinstance(optimizers, (list, tuple)) and optimizers:
+            return list(optimizers)
+        opt = env.get("optimizer")
+        if opt is not None:
+            return [opt]
+        return []
+
     def snapshot(self, env: dict) -> dict:
-        opt = self._resolve_optimizer(env)
-        if opt is None:
+        """Snapshot all optimizers for rollback."""
+        all_opts = self._resolve_all_optimizers(env)
+        if not all_opts:
             return {}
-        groups = []
-        for g in opt.param_groups:
-            snap = {"lr": g.get("lr")}
-            if "weight_decay" in g:
-                snap["weight_decay"] = g["weight_decay"]
-            if "betas" in g:
-                snap["betas"] = list(g["betas"])
-            groups.append(snap)
-        return {"groups": groups}
+        all_groups = []
+        for opt in all_opts:
+            groups = []
+            for g in opt.param_groups:
+                snap = {"lr": g.get("lr")}
+                if "weight_decay" in g:
+                    snap["weight_decay"] = g["weight_decay"]
+                if "betas" in g:
+                    snap["betas"] = list(g["betas"])
+                groups.append(snap)
+            all_groups.append(groups)
+        return {"all_groups": all_groups, "groups": all_groups[0] if all_groups else []}
 
     def validate(self, patch: dict, env: dict) -> ValidationResult:
         errors: List[str] = []
@@ -61,6 +84,15 @@ class OptimizerActuator:
         if value is None:
             errors.append("missing value")
             return ValidationResult(valid=False, errors=errors)
+
+        # Validate opt_idx if specified
+        opt_idx = patch.get("opt_idx", 0)
+        all_opts = self._resolve_all_optimizers(env)
+        if all_opts and opt_idx >= len(all_opts):
+            errors.append(
+                f"opt_idx={opt_idx} out of range "
+                f"(only {len(all_opts)} optimizer(s) available)"
+            )
 
         if op == "lr_mult":
             if not isinstance(value, (int, float)) or value <= 0:
@@ -89,9 +121,10 @@ class OptimizerActuator:
         return ValidationResult(valid=len(errors) == 0, errors=errors)
 
     def apply(self, patch: dict, env: dict) -> ApplyResult:
-        opt = self._resolve_optimizer(env)
+        opt_idx = int(patch.get("opt_idx", 0))
+        opt = self._resolve_optimizer(env, opt_idx)
         if opt is None:
-            return ApplyResult(success=False, error="missing_optimizer")
+            return ApplyResult(success=False, error=f"missing_optimizer (opt_idx={opt_idx})")
 
         op = patch.get("op")
         value = patch.get("value")
@@ -118,22 +151,31 @@ class OptimizerActuator:
             return ApplyResult(success=False, error=str(e))
 
     def restore(self, snapshot: dict, env: dict) -> ApplyResult:
-        opt = self._resolve_optimizer(env)
-        if opt is None:
+        all_groups = snapshot.get("all_groups")
+        if all_groups is None:
+            # Backward compat: old snapshots have "groups" for optimizer 0
+            groups = snapshot.get("groups", [])
+            all_groups = [groups] if groups else []
+
+        all_opts = self._resolve_all_optimizers(env)
+        if not all_opts:
             return ApplyResult(success=False, error="missing_optimizer")
 
-        groups = snapshot.get("groups", [])
         try:
-            for i, snap in enumerate(groups):
-                if i >= len(opt.param_groups):
+            for opt_i, groups_snap in enumerate(all_groups):
+                if opt_i >= len(all_opts):
                     break
-                g = opt.param_groups[i]
-                if "lr" in snap:
-                    g["lr"] = snap["lr"]
-                if "weight_decay" in snap:
-                    g["weight_decay"] = snap["weight_decay"]
-                if "betas" in snap:
-                    g["betas"] = tuple(snap["betas"])
+                opt = all_opts[opt_i]
+                for i, snap in enumerate(groups_snap):
+                    if i >= len(opt.param_groups):
+                        break
+                    g = opt.param_groups[i]
+                    if "lr" in snap:
+                        g["lr"] = snap["lr"]
+                    if "weight_decay" in snap:
+                        g["weight_decay"] = snap["weight_decay"]
+                    if "betas" in snap:
+                        g["betas"] = tuple(snap["betas"])
             return ApplyResult(success=True)
         except Exception as e:
             return ApplyResult(success=False, error=str(e))
@@ -148,4 +190,5 @@ class OptimizerActuator:
                 "wd_set": {"type": "float", "bounds": list(self.wd_bounds)},
                 "betas_set": {"type": "list[float]", "length": 2, "element_bounds": [0.0, 1.0]},
             },
+            "supports_opt_idx": True,
         }

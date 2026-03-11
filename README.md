@@ -19,6 +19,10 @@ Version 2.0 expands the original live-callback system into a full control plane:
 
 Plus:
 
+- **Dashboard** (`hotcb serve`): live metric charts, command panel, recipe editor, autopilot controls
+- **Autopilot**: rule-based and AI-driven training optimization — plateau/divergence/overfitting detection with automatic or LLM-guided intervention
+- **AI Autopilot** (`hotcb[ai]`): LLM reads compressed metric trends, analyzes alerts, and proposes/applies hotcb commands — with budget caps, safety guards, and multi-run memory
+- **Programmatic launch API** (`hotcb.launch`): start training + dashboard + autopilot in one call from notebooks/scripts
 - **Applied ledger** (`hotcb.applied.jsonl`): step-indexed, authoritative record of what actually happened
 - **Recipe export + replay**: export a run's changes as a portable plan, replay in future runs deterministically
 - **Freeze modes**: production lock, deterministic replay, replay-with-adjustments
@@ -37,7 +41,19 @@ pip install hotcb
 pip install "hotcb[yaml]"
 ```
 
-**Full extras (YAML + Lightning + HuggingFace adapters):**
+**With dashboard:**
+
+```bash
+pip install "hotcb[dashboard]"
+```
+
+**With AI autopilot (LLM-driven optimization):**
+
+```bash
+pip install "hotcb[dashboard,ai]"
+```
+
+**Full extras (YAML + Lightning + HF + dashboard + AI + tune):**
 
 ```bash
 pip install "hotcb[all]"
@@ -143,7 +159,52 @@ hotcb --dir runs/exp1 set distill_w=0.25   # → loss
 
 ---
 
-### 4. Enable online tuning (optional)
+### 4. Launch the dashboard
+
+```bash
+# Dashboard only (attach to existing run)
+hotcb serve --dir runs/exp1
+
+# Dashboard + synthetic training demo
+hotcb demo
+hotcb demo --golden                 # multi-task demo with rich metrics
+
+# Dashboard + autopilot (rule-based or AI-driven)
+hotcb demo --autopilot suggest      # rule-based, proposals shown in UI
+hotcb demo --autopilot ai_suggest   # LLM-driven, proposals shown in UI
+hotcb demo --autopilot ai_auto      # LLM-driven, auto-applies with safety guards
+```
+
+Open `http://localhost:8421` to see live charts, send commands, and monitor autopilot decisions.
+
+### 5. Programmatic launch (notebooks / scripts)
+
+```python
+from hotcb.launch import launch
+
+handle = launch(
+    train_fn="my_module:train",     # or a callable
+    autopilot="ai_suggest",
+    key_metric="val_loss",
+    max_steps=1000,
+    serve=True,                     # start dashboard
+)
+
+handle.wait()                       # block until done
+handle.metrics()                    # read latest metrics
+handle.set_param(lr=0.0005)         # send live commands
+handle.stop()                       # stop early
+```
+
+### 6. One-command launch (CLI)
+
+```bash
+hotcb launch --config multitask --autopilot ai_suggest --key-metric val_loss --max-steps 1000
+hotcb launch --config multitask --autopilot ai_suggest --max-time 300  # 5-minute run
+hotcb launch --train-fn my_module:train --autopilot ai_auto --ai-budget 2.0
+```
+
+### 7. Enable online tuning (optional)
 
 ```bash
 # Register actuators in your training script (see docs/modules/hottune.md)
@@ -171,6 +232,10 @@ hotcb --dir runs/exp1 tune status
 | `hotcb.tune.mutations.jsonl` | Tune mutation log (if tune enabled) |
 | `hotcb.tune.segments.jsonl` | Tune evaluation segments (if tune enabled) |
 | `hotcb.tune.summary.json` | Tune run summary (if tune enabled) |
+| `hotcb.metrics.jsonl` | Training metrics stream (step, metrics dict) |
+| `hotcb.features.jsonl` | Activation capture data (optional) |
+| `hotcb.run.json` | Run metadata (config, seed, timestamps) |
+| `hotcb.ai.state.json` | AI autopilot state (key metric, run history, learnings) |
 
 ---
 
@@ -299,19 +364,42 @@ class MyCallback:
 
 ---
 
+## Autopilot
+
+hotcb includes a multi-level autopilot system:
+
+| Mode | Behavior |
+|---|---|
+| `off` | No autopilot — manual control only |
+| `suggest` | Rule-based: detects plateau/divergence/overfitting, proposes actions in dashboard |
+| `auto` | Rule-based: detects and auto-applies corrective actions |
+| `ai_suggest` | LLM-driven: reads metric trends + alerts, proposes actions for human review |
+| `ai_auto` | LLM-driven: proposes and auto-applies with safety guards |
+
+AI autopilot features:
+- **Compressed trend context**: sends slope/volatility/direction summaries (not raw values) to the LLM for token efficiency
+- **Key metric system**: primary optimization target, changeable by AI or human mid-run
+- **Multi-run memory**: carries learnings across 2-3 runs via `hotcb.ai.state.json`
+- **Budget cap**: configurable USD limit; falls back to rule-based when exhausted
+- **Safety guards**: action bounds, cooldown between interventions, noop bias, auto-disable on divergence
+
+Set `HOTCB_AI_KEY` env var for the LLM API key (any OpenAI-compatible provider).
+
 ## Safety
 
 - No training loop mutation — hotcb never touches the trainer internals
 - Safe-point updates only — changes applied at batch/step boundaries
 - Fail-safe — crashing callbacks and modules auto-disable, training continues
 - Full audit trail — every mutation written to the applied ledger
+- AI actions bounded — hard min/max on all parameter changes, minimum 10-step cooldown
 
 ---
 
 ## Docs
 
-- [Concepts](docs/concepts.md) — HotKernel, ops, ledger, recipe, freeze modes
-- [CLI Reference](docs/cli.md) — all commands and sugar rules
+- [Integration Guide](INTEGRATION.md) — minimal reference for wiring hotcb into any training project (also useful for AI agents)
+- [Concepts](docs/concepts.md) — HotKernel, ops, ledger, recipe, freeze modes, dashboard, autopilot
+- [CLI Reference](docs/cli.md) — all commands including serve, demo, launch
 - [Replay](docs/replay.md) — recipe export, replay modes, overlays
 - [Formats](docs/formats.md) — JSONL, JSON, and YAML schemas
 - Modules: [cb](docs/modules/cb.md) | [opt](docs/modules/hotopt.md) | [loss](docs/modules/hotloss.md) | [tune](docs/modules/hottune.md)

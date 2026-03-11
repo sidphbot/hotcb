@@ -4,6 +4,8 @@ hotcb.server.autopilot — Self-mode rule engine for autonomous training control
 Monitors metrics and proposes or auto-applies training interventions
 based on configurable rules (community guidelines).
 
+Modes: off, suggest, auto (rule-based), ai_suggest, ai_auto (LLM-driven).
+
 Actions are executed by writing JSONL to ``hotcb.commands.jsonl``.
 """
 import collections
@@ -15,6 +17,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("hotcb.server.autopilot")
+
+_VALID_MODES = {"off", "suggest", "auto", "ai_suggest", "ai_auto"}
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -142,8 +146,11 @@ def _eval_custom(
         result = eval(expression, {"__builtins__": {}}, safe_ns)  # noqa: S307
         if result:
             return f"Custom condition met: {expression}"
+    except NameError:
+        # Metric not yet available in stream — silently skip
+        pass
     except Exception as exc:
-        log.warning("Custom condition eval failed: %s — %s", expression, exc)
+        log.debug("Custom condition eval failed: %s — %s", expression, exc)
     return None
 
 
@@ -159,13 +166,15 @@ class AutopilotEngine:
 
     Modes
     -----
-    - ``"off"``     — engine is disabled, no evaluation
-    - ``"suggest"`` — evaluate rules and record proposals, never auto-apply
-    - ``"auto"``    — apply high-confidence actions, propose the rest
+    - ``"off"``        — engine is disabled, no evaluation
+    - ``"suggest"``    — evaluate rules and record proposals, never auto-apply
+    - ``"auto"``       — apply high-confidence actions, propose the rest
+    - ``"ai_suggest"`` — LLM proposes actions, human reviews in dashboard
+    - ``"ai_auto"``    — LLM proposes and applies (with safety guards)
     """
 
     def __init__(self, run_dir: str, mode: str = "off") -> None:
-        if mode not in ("off", "suggest", "auto"):
+        if mode not in _VALID_MODES:
             raise ValueError(f"Invalid mode: {mode!r}")
         self._run_dir = run_dir
         self._mode = mode
@@ -176,6 +185,8 @@ class AutopilotEngine:
         # Cooldown tracking: rule_id -> last-fired step
         self._last_fired: dict[str, int] = {}
         self._default_cooldown: int = 10
+        # AI engine reference (set externally via set_ai_engine)
+        self._ai_engine: Any = None
 
     @classmethod
     def with_default_guidelines(cls, run_dir: str, mode: str = "off") -> "AutopilotEngine":
@@ -192,9 +203,15 @@ class AutopilotEngine:
     def mode(self) -> str:
         return self._mode
 
+    def set_ai_engine(self, ai_engine: Any) -> None:
+        """Attach the LLM autopilot engine."""
+        self._ai_engine = ai_engine
+
     def set_mode(self, mode: str) -> None:
-        if mode not in ("off", "suggest", "auto"):
+        if mode not in _VALID_MODES:
             raise ValueError(f"Invalid mode: {mode!r}")
+        if mode in ("ai_suggest", "ai_auto") and self._ai_engine is None:
+            raise ValueError("AI engine not configured — cannot use AI modes")
         log.info("[hotcb.autopilot] mode changed: %s -> %s", self._mode, mode)
         self._mode = mode
 
@@ -426,6 +443,222 @@ class AutopilotEngine:
                 return action
         return None
 
+    # -- AI mode helpers -----------------------------------------------------
+
+    @property
+    def is_ai_mode(self) -> bool:
+        return self._mode in ("ai_suggest", "ai_auto")
+
+    def evaluate_rules_for_alerts(
+        self, step: int, metrics: dict[str, float]
+    ) -> list[AutopilotAction]:
+        """
+        Run rule conditions for alert detection only (no auto-apply).
+        Used in AI modes where rules act as the sensor layer.
+        """
+        # Update metric history
+        for name, value in metrics.items():
+            self._metric_history[name].append(value)
+
+        alerts: list[AutopilotAction] = []
+        for rule in self._rules.values():
+            if not rule.enabled:
+                continue
+            if rule.condition not in _VALID_CONDITIONS:
+                continue
+            cooldown = rule.params.get("cooldown", self._default_cooldown)
+            last = self._last_fired.get(rule.rule_id, -999999)
+            if step - last < cooldown:
+                continue
+
+            condition_desc = self._check_condition(rule, metrics)
+            if condition_desc is None:
+                continue
+
+            alert = AutopilotAction(
+                action_id=str(uuid.uuid4()),
+                rule_id=rule.rule_id,
+                step=step,
+                wall_time=time.time(),
+                condition_met=condition_desc,
+                proposed_action=rule.action,
+                confidence=rule.confidence,
+                status="alert",  # not proposed or applied — just an alert
+            )
+            alerts.append(alert)
+            self._last_fired[rule.rule_id] = step
+        return alerts
+
+    async def evaluate_async(
+        self, step: int, metrics: dict[str, float]
+    ) -> list[AutopilotAction]:
+        """
+        Async evaluation for AI modes.  Runs rules for alerts,
+        then checks AI cadence and invokes LLM if needed.
+        """
+        if self._mode == "off":
+            return []
+
+        # Non-AI modes: delegate to sync evaluate
+        if not self.is_ai_mode:
+            return self.evaluate(step, metrics)
+
+        if self._ai_engine is None:
+            return []
+
+        # Run rules as alert/sensor layer (no auto-apply)
+        alerts = self.evaluate_rules_for_alerts(step, metrics)
+
+        # Check if AI should be invoked
+        alert_dicts = [asdict(a) for a in alerts]
+        if not self._ai_engine.should_invoke(step, alert_dicts):
+            # Still record alerts in history for visibility
+            for alert in alerts:
+                self._history.append(alert)
+            return alerts
+
+        # Build current state from latest metrics
+        current_state = {}
+        for name in ("lr", "weight_decay", "grad_norm"):
+            val = self._get_latest_metric(name)
+            if val is not None:
+                current_state[name] = val
+
+        # Invoke AI
+        decision = await self._ai_engine.invoke(
+            step=step,
+            metric_history=dict(self._metric_history),
+            alerts=alert_dicts,
+            action_history=self._ai_engine.get_history(last_n=10),
+            current_state=current_state,
+        )
+
+        if decision is None:
+            return alerts
+
+        # Process AI actions
+        ai_actions = []
+        available_metrics = list(self._metric_history.keys())
+        for act in decision.actions:
+            action_name = act.get("action", "")
+            params = act.get("params", {})
+
+            # Meta-actions handled by AI engine
+            if action_name == "set_key_metric":
+                self._ai_engine.handle_set_key_metric(
+                    params.get("metric", ""), available_metrics
+                )
+                continue
+            elif action_name == "add_watch_metric":
+                self._ai_engine.handle_watch_metric(params.get("metric", ""), add=True)
+                continue
+            elif action_name == "remove_watch_metric":
+                self._ai_engine.handle_watch_metric(params.get("metric", ""), add=False)
+                continue
+            elif action_name == "request_raw_metrics":
+                # Handled via next_check in ai_engine
+                continue
+            elif action_name == "declare_rerun":
+                self._ai_engine.handle_declare_rerun(
+                    params.get("verdict", ""), params.get("learnings", [])
+                )
+                continue
+            elif action_name == "finalize_recipe":
+                self._ai_engine.handle_finalize_recipe(params.get("summary", ""))
+                continue
+            elif action_name == "noop":
+                continue
+
+            # Translate AI action to hotcb command
+            cmd = self._ai_action_to_command(action_name, params)
+            if cmd is None:
+                continue
+
+            status = "applied" if self._mode == "ai_auto" else "proposed"
+
+            ap_action = AutopilotAction(
+                action_id=str(uuid.uuid4()),
+                rule_id=f"ai:{action_name}",
+                step=step,
+                wall_time=time.time(),
+                condition_met=f"AI: {decision.reasoning[:120]}",
+                proposed_action=cmd,
+                confidence="medium",
+                status=status,
+            )
+
+            if status == "applied":
+                self._apply_action(cmd)
+
+            self._history.append(ap_action)
+            ai_actions.append(ap_action)
+
+        return alerts + ai_actions
+
+    def _ai_action_to_command(self, action_name: str, params: dict) -> Optional[dict]:
+        """Convert an AI action to a hotcb command dict."""
+        if action_name == "set_lr":
+            return {
+                "module": "opt",
+                "op": "set_params",
+                "params": {"lr": params.get("lr")},
+                "source": "ai_autopilot",
+            }
+        elif action_name == "set_lr_optimizer":
+            cmd_params = {"lr": params.get("lr")}
+            opt_idx = params.get("opt_idx", 0)
+            if opt_idx:
+                cmd_params["opt_idx"] = int(opt_idx)
+            return {
+                "module": "opt",
+                "op": "set_params",
+                "params": cmd_params,
+                "source": "ai_autopilot",
+            }
+        elif action_name == "reduce_lr_factor":
+            factor = params.get("factor", 0.5)
+            current_lr = self._get_latest_metric("lr")
+            lr = (current_lr or 1e-4) * factor
+            return {
+                "module": "opt",
+                "op": "set_params",
+                "params": {"lr": lr},
+                "source": "ai_autopilot",
+            }
+        elif action_name == "set_wd":
+            return {
+                "module": "opt",
+                "op": "set_params",
+                "params": {"weight_decay": params.get("weight_decay")},
+                "source": "ai_autopilot",
+            }
+        elif action_name == "set_loss_weight":
+            term = params.get("term", "weight")
+            weight = params.get("weight", 1.0)
+            return {
+                "module": "loss",
+                "op": "set_params",
+                "params": {term: weight},
+                "source": "ai_autopilot",
+            }
+        elif action_name == "enable_callback":
+            return {
+                "module": "cb",
+                "op": "enable",
+                "id": params.get("id", ""),
+                "source": "ai_autopilot",
+            }
+        elif action_name == "disable_callback":
+            return {
+                "module": "cb",
+                "op": "disable",
+                "id": params.get("id", ""),
+                "source": "ai_autopilot",
+            }
+
+        log.warning("[hotcb.autopilot] Unknown AI action: %s", action_name)
+        return None
+
     # -- History ------------------------------------------------------------
 
     @property
@@ -438,13 +671,14 @@ class AutopilotEngine:
 # ---------------------------------------------------------------------------
 
 
-def create_router(engine: Optional[AutopilotEngine] = None) -> Any:
+def create_router(engine: Optional[AutopilotEngine] = None, ai_engine: Any = None) -> Any:
     """Build the autopilot API router. Requires FastAPI."""
     from fastapi import APIRouter
     from fastapi.responses import JSONResponse
     from pydantic import BaseModel
 
     _engine = engine
+    _ai_engine = ai_engine
     router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
     class ModeRequest(BaseModel):
@@ -561,5 +795,73 @@ def create_router(engine: Optional[AutopilotEngine] = None) -> Any:
                 content={"error": f"Action {action_id!r} not found or already applied"},
             )
         return {"status": "applied", "action_id": action_id}
+
+    # -- AI autopilot endpoints ---------------------------------------------
+
+    @router.get("/ai/status")
+    async def ai_status():
+        """Return AI autopilot status (config, cost, key metric, etc.)."""
+        if _ai_engine is None:
+            return {"enabled": False, "error": "AI engine not configured"}
+        return _ai_engine.get_status()
+
+    class AIConfigUpdate(BaseModel):
+        provider: Optional[str] = None
+        model: Optional[str] = None
+        api_key: Optional[str] = None
+        base_url: Optional[str] = None
+        temperature: Optional[float] = None
+        max_tokens: Optional[int] = None
+        cadence: Optional[int] = None
+        budget_cap: Optional[float] = None
+        max_runs: Optional[int] = None
+
+    @router.post("/ai/config")
+    async def ai_config_update(body: AIConfigUpdate):
+        """Update AI config at runtime."""
+        if _ai_engine is None:
+            return JSONResponse(status_code=400, content={"error": "AI engine not configured"})
+        updates = {k: v for k, v in body.dict().items() if v is not None}
+        _ai_engine.update_config(updates)
+        return {"status": "updated", "config": _ai_engine.config.to_safe_dict()}
+
+    @router.get("/ai/history")
+    async def ai_history(last_n: int = 50):
+        """Return recent AI decisions with reasoning."""
+        if _ai_engine is None:
+            return {"decisions": []}
+        return {"decisions": _ai_engine.get_history(last_n)}
+
+    class KeyMetricRequest(BaseModel):
+        metric: str
+
+    @router.post("/ai/key_metric")
+    async def ai_set_key_metric(body: KeyMetricRequest):
+        """Set key metric manually.
+
+        Allows setting any metric name — the metric doesn't need to be
+        in the stream yet (it might appear in future steps).
+        """
+        if _ai_engine is None:
+            return JSONResponse(status_code=400, content={"error": "AI engine not configured"})
+        # Allow setting any metric name — don't require it to exist in
+        # the stream yet (it may appear after a val epoch, or the user
+        # knows it will appear from their training code)
+        available = list(_engine._metric_history.keys()) if _engine else []
+        # Try the strict path first; fall back to force-set
+        ok = _ai_engine.handle_set_key_metric(body.metric, available)
+        if not ok:
+            # Force-set: the user explicitly asked for this metric
+            _ai_engine.state.key_metric = body.metric
+            _ai_engine.save_state()
+            log.info("[hotcb.autopilot] key metric force-set to: %s", body.metric)
+        return {"status": "updated", "key_metric": body.metric}
+
+    @router.get("/ai/state")
+    async def ai_state():
+        """Return full AI state (multi-run context)."""
+        if _ai_engine is None:
+            return {"error": "AI engine not configured"}
+        return _ai_engine.state.to_dict()
 
     return router

@@ -24,6 +24,11 @@ class HotLossController:
     def __init__(self, auto_disable_on_error: bool = True) -> None:
         self.handles: Dict[str, LossHandle] = {}
         self.auto_disable_on_error = auto_disable_on_error
+        self._actuator = None
+
+    def set_actuator(self, actuator) -> None:
+        """Register a LossStateActuator for pre-apply validation."""
+        self._actuator = actuator
 
     def _resolve_loss_state(self, env: dict):
         if "loss_state" in env:
@@ -58,6 +63,23 @@ class HotLossController:
             loss_state = self._resolve_loss_state(env)
             if loss_state is None:
                 return ModuleResult(decision="failed", error="missing_loss_state")
+
+            # Pre-validate via actuator if registered
+            if self._actuator is not None:
+                try:
+                    for key, value in self._actuator_weight_patches(params):
+                        vresult = self._actuator.validate(
+                            {"op": "set", "key": key, "value": value}, env,
+                        )
+                        if not vresult.valid:
+                            return ModuleResult(
+                                decision="failed",
+                                error=f"validation: {'; '.join(vresult.errors)}",
+                                notes="actuator_validation_failed",
+                            )
+                except Exception:
+                    pass  # validation is best-effort
+
             try:
                 self._apply_params(loss_state, params)
                 return ModuleResult(decision="applied", payload=params)
@@ -68,6 +90,19 @@ class HotLossController:
                 return ModuleResult(decision="failed", error=str(e), traceback=tb_mod.format_exc())
 
         return ModuleResult(decision="ignored", notes=f"unknown_op:{op.op}")
+
+    @staticmethod
+    def _actuator_weight_patches(params: dict):
+        """Yield (key, value) pairs for loss weight actuator validation."""
+        for k, v in params.items():
+            if k.endswith("_w"):
+                yield k[:-2], v
+            elif k.startswith("terms.") or k == "terms":
+                continue  # terms are toggles, not validated by actuator
+            elif k.startswith("ramps.") or k == "ramps":
+                continue  # ramps are configs, not validated by actuator
+            elif isinstance(v, (int, float)):
+                yield k, v
 
     def _apply_params(self, loss_state: dict, params: dict) -> None:
         weights = loss_state.setdefault("weights", {})

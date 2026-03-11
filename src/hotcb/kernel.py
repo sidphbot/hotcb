@@ -91,6 +91,15 @@ class HotKernel:
         tune = self.modules.get("tune")
         if tune is not None and hasattr(tune, "register_actuator"):
             tune.register_actuator(name, actuator)
+        # Wire actuator validation into the corresponding module
+        if name == "opt":
+            opt_mod = self.modules.get("opt")
+            if opt_mod is not None and hasattr(opt_mod, "set_actuator"):
+                opt_mod.set_actuator(actuator)
+        elif name == "loss":
+            loss_mod = self.modules.get("loss")
+            if loss_mod is not None and hasattr(loss_mod, "set_actuator"):
+                loss_mod.set_actuator(actuator)
 
     def get_actuator(self, name: str) -> Optional[BaseActuator]:
         return self._actuators.get(name)
@@ -172,7 +181,11 @@ class HotKernel:
                     pass  # defensive — never crash training
 
         # collect metrics (zero overhead when collector is None)
-        if self._metrics_collector is not None:
+        # Skip metric collection on grad accumulation micro-steps to avoid
+        # recording noisy intermediate values (loss is not yet reduced,
+        # grad_norm is meaningless before unscale, etc.)
+        is_accum_step = env.get("is_accumulation_step", False)
+        if self._metrics_collector is not None and not is_accum_step:
             try:
                 self._metrics_collector.collect(env)
             except Exception:

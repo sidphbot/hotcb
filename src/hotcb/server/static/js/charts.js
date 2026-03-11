@@ -679,6 +679,7 @@ function createMetricCard(name) {
         name +
       '</span>' +
       '<div class="btn-group">' +
+        '<button class="btn btn-sm metric-card-key" title="Set as key metric" style="font-size:9px;color:var(--yellow,#facc15)">&#x2605;</button>' +
         '<button class="btn btn-sm metric-card-focus" title="Focus/expand">&#x26F6;</button>' +
         '<button class="btn btn-sm metric-card-close" title="Unpin">&times;</button>' +
       '</div>' +
@@ -692,6 +693,24 @@ function createMetricCard(name) {
   });
   card.querySelector('.metric-card-focus').addEventListener('click', function() {
     focusMetricCard(name);
+  });
+  card.querySelector('.metric-card-key').addEventListener('click', function() {
+    if (confirm('Set "' + name + '" as the key metric for autopilot optimization?')) {
+      api('POST', '/api/autopilot/ai/key_metric', {metric: name}).then(function(res) {
+        if (res && res.status === 'updated') {
+          // Update AI key metric dropdown if it exists
+          var keyMetricEl = document.getElementById('aiKeyMetric');
+          if (keyMetricEl) keyMetricEl.value = name;
+          // Visual feedback — highlight the star
+          var stars = document.querySelectorAll('.metric-card-key');
+          stars.forEach(function(s) { s.style.color = 'var(--yellow,#facc15)'; s.style.fontWeight = ''; });
+          var thisCard = card.querySelector('.metric-card-key');
+          if (thisCard) { thisCard.style.color = 'var(--green,#4ade80)'; thisCard.style.fontWeight = 'bold'; }
+        } else {
+          alert('Failed to set key metric: ' + ((res && res.error) || 'unknown error'));
+        }
+      });
+    }
   });
 
   container.appendChild(card);

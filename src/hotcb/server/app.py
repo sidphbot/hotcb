@@ -125,6 +125,7 @@ def create_app(
     from .manifolds import ManifoldEngine, create_router as manifolds_router_factory
     from .autopilot import AutopilotEngine, create_router as autopilot_router_factory
     from .launcher import TrainingLauncher, create_router as launcher_router_factory
+    from .ai_engine import LLMAutopilotEngine, AIConfig
 
     manager = ConnectionManager()
     tailer = JsonlTailer(poll_interval=poll_interval)
@@ -133,6 +134,10 @@ def create_app(
     manifold_engine = ManifoldEngine()
     autopilot_engine = AutopilotEngine.with_default_guidelines(run_dir=run_dir, mode="off")
     training_launcher = TrainingLauncher(run_dir=run_dir)
+
+    # Initialize AI autopilot engine
+    ai_engine = LLMAutopilotEngine(run_dir=run_dir, config=AIConfig())
+    autopilot_engine.set_ai_engine(ai_engine)
     _tailer_task: Optional[asyncio.Task] = None
 
     # Resolve JSONL paths
@@ -181,14 +186,19 @@ def create_app(
                 manifold_engine.update_interventions(records)
             tailer.subscribe("applied", _manifold_applied_feed)
 
-        # Feed metrics into autopilot engine
+        # Feed metrics into autopilot engine (async for AI mode support)
         if "metrics" in tailer._targets:
             async def _autopilot_feed(ch: str, records: list) -> None:
                 for rec in records:
                     step = rec.get("step")
                     metrics = rec.get("metrics")
                     if step is not None and metrics:
-                        actions = autopilot_engine.evaluate(int(step), metrics)
+                        if autopilot_engine.is_ai_mode:
+                            actions = await autopilot_engine.evaluate_async(
+                                int(step), metrics
+                            )
+                        else:
+                            actions = autopilot_engine.evaluate(int(step), metrics)
                         if actions:
                             from dataclasses import asdict
                             action_data = [asdict(a) for a in actions]
@@ -229,6 +239,7 @@ def create_app(
     app.state.projection_engine = projection_engine
     app.state.manifold_engine = manifold_engine
     app.state.autopilot_engine = autopilot_engine
+    app.state.ai_engine = ai_engine
     app.state.cb_registry = {}
 
     # Initialize recipe editor with default recipe path
@@ -244,7 +255,7 @@ def create_app(
     app.include_router(create_projections_router(projection_engine))
     app.include_router(recipe_router)
     app.include_router(manifolds_router_factory(manifold_engine))
-    app.include_router(autopilot_router_factory(autopilot_engine))
+    app.include_router(autopilot_router_factory(autopilot_engine, ai_engine=ai_engine))
     app.include_router(launcher_router_factory(training_launcher))
 
     # --- Feature snapshots endpoint ---
@@ -374,6 +385,87 @@ def create_app(
             )
         _write_ui_mode(mode)
         return {"mode": mode}
+
+    @app.get("/api/capabilities")
+    async def get_capabilities():
+        """Return training capabilities detected by the adapter."""
+        from ..capabilities import TrainingCapabilities
+        caps = TrainingCapabilities.load(run_dir)
+        if caps is None:
+            return {"detected": False}
+        return {"detected": True, **caps.to_dict()}
+
+    @app.get("/api/state/controls")
+    async def get_control_state():
+        """Return current control state for UI restoration on refresh.
+
+        Reads latest metrics for slider values, active config, autopilot mode,
+        and freeze state so the frontend can restore its controls.
+        """
+        state: dict = {}
+
+        # Latest metric values (for sliders)
+        metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")
+        last_metrics = _read_tail(metrics_path, 1)
+        if last_metrics:
+            state["latest_metrics"] = last_metrics[0].get("metrics", {})
+            state["latest_step"] = last_metrics[0].get("step", 0)
+        else:
+            state["latest_metrics"] = {}
+            state["latest_step"] = 0
+
+        # Active training config
+        run_json = os.path.join(run_dir, "hotcb.run.json")
+        if os.path.exists(run_json):
+            try:
+                with open(run_json, "r") as f:
+                    state["run_config"] = json.load(f)
+            except Exception:
+                state["run_config"] = {}
+        else:
+            state["run_config"] = {}
+
+        # Autopilot mode
+        state["autopilot_mode"] = autopilot_engine.mode
+
+        # Freeze state
+        state["freeze"] = _build_status(run_dir).get("freeze", {"mode": "off"})
+
+        # Training status
+        state["training_running"] = training_launcher.running
+        state["training_config"] = training_launcher._config if training_launcher.running else {}
+
+        # Last applied opt/loss params from applied ledger
+        applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
+        last_opt_params: dict = {}
+        last_loss_params: dict = {}
+        if os.path.exists(applied_path):
+            try:
+                with open(applied_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if rec.get("decision") != "applied":
+                            continue
+                        if rec.get("module") == "opt" and rec.get("payload"):
+                            last_opt_params.update(rec["payload"])
+                        elif rec.get("module") == "loss" and rec.get("payload"):
+                            last_loss_params.update(rec["payload"])
+            except Exception:
+                pass
+        state["last_opt_params"] = last_opt_params
+        state["last_loss_params"] = last_loss_params
+
+        # AI autopilot state
+        if ai_engine:
+            state["ai_key_metric"] = ai_engine.state.key_metric
+
+        return state
 
     return app
 

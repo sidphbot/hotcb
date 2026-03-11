@@ -97,7 +97,14 @@ function initControls() {
     debounceApply(async function() {
       var lr = lrFromSlider($('#knobLr').value);
       var wd = Math.pow(10, parseFloat($('#knobWd').value));
-      await api('POST', '/api/opt/set', {params: {lr: lr, weight_decay: wd}});
+      var optParams = {lr: lr, weight_decay: wd};
+      // Include opt_idx for multi-optimizer setups
+      var optIdxSel = document.getElementById('knobOptIdx');
+      if (optIdxSel && optIdxSel.parentElement.style.display !== 'none') {
+        var idx = parseInt(optIdxSel.value);
+        if (idx > 0) optParams.opt_idx = idx;
+      }
+      await api('POST', '/api/opt/set', {params: optParams});
 
       var configId = $('#trainConfig').value;
       if (configId === 'multitask') {
@@ -174,10 +181,26 @@ function initControls() {
 
   // Autopilot
   $('#autopilotMode').addEventListener('change', async function(e) {
-    await api('POST', '/api/autopilot/mode', {mode: e.target.value});
+    var mode = e.target.value;
+    var res = await api('POST', '/api/autopilot/mode', {mode: mode});
+    if (res && res.error) {
+      alert('Failed to set mode: ' + (res.detail || res.error || 'unknown error'));
+      e.target.value = 'off';
+    }
+    _updateAIConfigVisibility(mode);
     pollAutopilotStatus();
+    if (mode.startsWith('ai_')) pollAIStatus();
   });
   setInterval(pollAutopilotStatus, 3000);
+
+  // AI key metric dropdown
+  var aiKeyMetricEl = document.getElementById('aiKeyMetric');
+  if (aiKeyMetricEl) {
+    aiKeyMetricEl.addEventListener('change', async function(e) {
+      await api('POST', '/api/autopilot/ai/key_metric', {metric: e.target.value});
+      pollAIStatus();
+    });
+  }
 
   // Training launcher — config selection
   var _trainConfigDescs = {
@@ -304,6 +327,51 @@ function initControls() {
   $('#themeSelect').addEventListener('change', function(e) {
     setTheme(e.target.value);
   });
+}
+
+/* ================================================================ */
+/* Capabilities-aware UI adaptation                                  */
+/* ================================================================ */
+
+async function loadCapabilities() {
+  try {
+    var caps = await api('GET', '/api/capabilities');
+    if (!caps || !caps.detected) return;
+    S.capabilities = caps;
+
+    // Multi-optimizer: show optimizer selector
+    var numOpts = caps.num_optimizers || 1;
+    if (numOpts > 1) {
+      var multiOptEls = document.querySelectorAll('.multi-opt-only');
+      multiOptEls.forEach(function(el) { el.style.display = ''; });
+      var sel = document.getElementById('knobOptIdx');
+      if (sel) {
+        sel.innerHTML = '';
+        var names = caps.optimizer_names || [];
+        for (var i = 0; i < numOpts; i++) {
+          var opt = document.createElement('option');
+          opt.value = i;
+          var label = names[i] ? names[i] : ('optimizer ' + i);
+          var pg = (caps.num_param_groups || [])[i];
+          if (pg) label += ' (' + pg + ' groups)';
+          opt.textContent = label;
+          sel.appendChild(opt);
+        }
+      }
+    }
+
+    // Loss state: show/hide loss controls based on detected keys
+    if (caps.loss_state_detected && caps.loss_state_keys && caps.loss_state_keys.length > 0) {
+      // Show loss controls — they might be hidden if no demo config selected
+      var lossRows = document.querySelectorAll('[data-param="loss_w"]');
+      lossRows.forEach(function(el) { el.style.display = ''; });
+    }
+
+    // Grad clip info
+    if (caps.grad_clip_value !== null && caps.grad_clip_value !== undefined) {
+      var clipInfo = caps.grad_clip_wired ? 'wired' : 'advisory';
+    }
+  } catch(e) { /* ignore */ }
 }
 
 function syncSlidersFromApplied(params) {
@@ -537,6 +605,68 @@ function initSaveAsRecipe() {
 
 var _lastAutopilotCount = 0;
 
+function _updateAIConfigVisibility(mode) {
+  var section = document.getElementById('aiConfigSection');
+  if (section) {
+    section.style.display = (mode === 'ai_suggest' || mode === 'ai_auto') ? 'block' : 'none';
+  }
+}
+
+async function pollAIStatus() {
+  try {
+    var res = await api('GET', '/api/autopilot/ai/status');
+    if (!res || !res.enabled) return;
+
+    // Update cost info
+    var costEl = document.getElementById('aiCostInfo');
+    if (costEl) {
+      costEl.textContent = '$' + (res.total_cost_usd || 0).toFixed(4) + ' / $' + ((res.config && res.config.budget_cap) || 5).toFixed(2);
+    }
+    var callEl = document.getElementById('aiCallCount');
+    if (callEl) {
+      callEl.textContent = (res.call_count || 0) + ' calls';
+    }
+
+    // Run info
+    var runEl = document.getElementById('aiRunInfo');
+    var runNumEl = document.getElementById('aiRunNumber');
+    if (runEl && runNumEl) {
+      runEl.style.display = 'block';
+      runNumEl.textContent = 'Run ' + (res.run_number || 1) + '/' + (res.max_runs || 3);
+    }
+
+    // Populate key metric dropdown with available metrics
+    var keyMetricEl = document.getElementById('aiKeyMetric');
+    if (keyMetricEl) {
+      // Fetch metric names and populate
+      var metricNames = await api('GET', '/api/metrics/names');
+      if (metricNames && metricNames.names) {
+        var currentVal = keyMetricEl.value;
+        keyMetricEl.innerHTML = '';
+        metricNames.names.forEach(function(n) {
+          var opt = document.createElement('option');
+          opt.value = n;
+          opt.textContent = n;
+          keyMetricEl.appendChild(opt);
+        });
+        keyMetricEl.value = res.key_metric || currentVal || 'val_loss';
+      }
+    }
+
+    // Fetch latest AI reasoning
+    var histRes = await api('GET', '/api/autopilot/ai/history?last_n=1');
+    if (histRes && histRes.decisions && histRes.decisions.length > 0) {
+      var latest = histRes.decisions[histRes.decisions.length - 1];
+      var reasoningPanel = document.getElementById('aiReasoningPanel');
+      var reasoningEl = document.getElementById('aiReasoning');
+      if (reasoningPanel && reasoningEl && latest.reasoning) {
+        reasoningPanel.style.display = 'block';
+        reasoningEl.textContent = latest.reasoning;
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
 async function pollAutopilotStatus() {
   try {
     var res = await api('GET', '/api/autopilot/status');
@@ -550,17 +680,35 @@ async function pollAutopilotStatus() {
     var historyCount = res.history_count || 0;
     var recent = res.recent_actions || [];
 
+    // Sync mode dropdown
+    var modeSelect = document.getElementById('autopilotMode');
+    if (modeSelect && modeSelect.value !== mode) {
+      modeSelect.value = mode;
+      _updateAIConfigVisibility(mode);
+    }
+
     if (mode === 'off') {
-      statusEl.innerHTML = '<span style="color:var(--text-muted)">Autopilot is off. Select Suggest or Auto to enable.</span>';
+      statusEl.innerHTML = '<span style="color:var(--text-muted)">Autopilot is off. Select a mode to enable.</span>';
       var existing = panel.querySelectorAll('.autopilot-action');
       existing.forEach(function(el) { el.remove(); });
       _lastAutopilotCount = 0;
       return;
     }
 
-    var modeLabel = mode === 'suggest' ? 'Suggesting' : 'Auto-applying';
+    var modeLabels = {
+      'suggest': 'Suggesting',
+      'auto': 'Auto-applying',
+      'ai_suggest': 'AI Suggesting',
+      'ai_auto': 'AI Auto-applying',
+    };
+    var modeLabel = modeLabels[mode] || mode;
     statusEl.innerHTML = '<span style="color:var(--cyan)">' + modeLabel + '</span> &middot; ' +
       rulesCount + ' rules &middot; ' + historyCount + ' action(s)';
+
+    // Poll AI status if in AI mode
+    if (mode === 'ai_suggest' || mode === 'ai_auto') {
+      pollAIStatus();
+    }
 
     if (historyCount !== _lastAutopilotCount) {
       _lastAutopilotCount = historyCount;
@@ -571,10 +719,13 @@ async function pollAutopilotStatus() {
         var div = document.createElement('div');
         div.className = 'autopilot-action';
         div.style.cssText = 'font-size:10px;padding:4px 0;border-top:1px solid var(--border);margin-top:4px;';
+        var isAI = (action.rule_id || '').startsWith('ai:');
         var statusColor = action.status === 'applied' ? 'var(--green, #4ade80)' :
-                          action.status === 'proposed' ? 'var(--yellow, #facc15)' : 'var(--text-muted)';
+                          action.status === 'proposed' ? 'var(--yellow, #facc15)' :
+                          action.status === 'alert' ? 'var(--orange, #fb923c)' : 'var(--text-muted)';
+        var statusLabel = isAI ? 'AI ' + action.status : action.status;
         var badge = '<span class="ap-badge" style="color:' + statusColor + ';font-weight:600;text-transform:uppercase;font-size:9px">' +
-                    action.status + '</span>';
+                    statusLabel + '</span>';
         var step = action.step || '?';
         var ruleId = action.rule_id || '?';
         var condition = action.condition_met || '';

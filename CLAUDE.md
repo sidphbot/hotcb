@@ -69,8 +69,14 @@ FastAPI app (`app.py`) served via `hotcb serve`. Architecture:
 - **`tailer.py`**: `JsonlTailer` polls JSONL files and pushes to WebSocket subscribers via `ConnectionManager`
 - **`api.py`**: REST router — command endpoints append to `hotcb.commands.jsonl`
 - **`projections.py`**, **`manifolds.py`**, **`autopilot.py`**, **`recipe_editor.py`**, **`notifications.py`**: Feature routers using **closure-based factory pattern** (not Request injection) — each has a `create_*_router(deps)` function
+- **`ai_engine.py`**: `LLMAutopilotEngine` — LLM decision engine with `AIConfig`, `AIState`, cost tracking, multi-run state persistence (`hotcb.ai.state.json`)
+- **`ai_prompts.py`**: `TrendCompressor`, `build_context()`, `parse_ai_response()`, `ACTION_SCHEMA` — prompt assembly and response parsing for AI autopilot
 - **`launcher.py`**: Training launch/stop/reset from the dashboard
 - Static frontend: `server/static/` — vanilla JS (charts.js, controls.js, panels.js, websocket.js, state.js, init.js)
+
+### Launch API (`src/hotcb/launch.py`)
+
+Programmatic API for starting training + dashboard + autopilot in one call. Returns `LaunchHandle` with methods for metrics access, live commands, and AI state inspection. Used by `hotcb launch` CLI and notebook workflows.
 
 ### Adapters (`src/hotcb/adapters/`)
 
@@ -92,3 +98,5 @@ Synthetic benchmarks and CIFAR-10 autopilot evaluation. `tasks.py` defines tasks
 - **`CallbackTarget` lives in `hotcb.ops`**, not in `modules/cb/`.
 - **No base class required for callbacks**: Duck-typed protocol — implement `handle(event, env)` and optionally `set_params(**kwargs)`.
 - **Source layout**: `src/hotcb/` is the single package. All imports use `hotcb.*`.
+- **Autopilot modes**: `off`, `suggest`, `auto` (rule-based); `ai_suggest`, `ai_auto` (LLM-driven). Rules act as sensor layer for AI modes.
+- **AI autopilot uses OpenAI-compatible API**: configured via `HOTCB_AI_KEY` env var and `AIConfig`. Works with OpenAI, ollama, vLLM.

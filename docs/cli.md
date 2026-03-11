@@ -316,6 +316,103 @@ hotcb --dir runs/exp-001 set lr=5e-5           # -> opt set_params
 hotcb --dir runs/exp-001 set distill_w=0.25    # -> loss set_params
 ```
 
+## `hotcb serve`
+
+Start the dashboard server, optionally with autopilot.
+
+```bash
+hotcb serve --dir runs/exp1
+hotcb serve --dir runs/exp1 --port 9000
+hotcb serve --dir runs/exp1 --autopilot ai_suggest --key-metric val_loss
+```
+
+Options:
+- `--host <addr>` -- bind address (default: `127.0.0.1`)
+- `--port <int>` -- port (default: `8421`)
+- `--autopilot {off,suggest,auto,ai_suggest,ai_auto}` -- autopilot mode (default: `off`)
+- `--key-metric <name>` -- primary metric for AI optimization (default: `val_loss`)
+
+Dashboard URL: `http://localhost:8421`
+
+## `hotcb demo`
+
+Launch synthetic training with the dashboard.
+
+```bash
+hotcb demo                              # simple synthetic training
+hotcb demo --golden                     # multi-task demo with rich metrics
+hotcb demo --autopilot ai_suggest       # with AI autopilot
+hotcb demo --autopilot suggest --key-metric val_loss
+```
+
+Options:
+- `--golden` -- use multi-task golden demo (classification + reconstruction)
+- `--port <int>` -- dashboard port (default: `8421`)
+- `--autopilot {off,suggest,auto,ai_suggest,ai_auto}` -- autopilot mode (default: `off`)
+- `--key-metric <name>` -- primary metric for AI optimization (default: `val_loss`)
+
+## `hotcb launch`
+
+Start training + dashboard + autopilot in one command.
+
+```bash
+# Built-in configs
+hotcb launch --config simple --max-steps 500
+hotcb launch --config multitask --autopilot ai_suggest --key-metric val_loss
+
+# Time-bounded run (5 minutes, regardless of GPU speed)
+hotcb launch --config multitask --max-time 300 --autopilot ai_suggest
+
+# Custom training function
+hotcb launch --train-fn my_module:train --max-steps 1000
+
+# Full options
+hotcb launch --config multitask \
+    --autopilot ai_auto \
+    --key-metric val_loss \
+    --ai-model gpt-4o-mini \
+    --ai-budget 5.0 \
+    --ai-cadence 50 \
+    --max-steps 2000 \
+    --seed 42
+```
+
+Options:
+- `--config {simple,multitask,finetune}` -- built-in training config (default: `multitask`)
+- `--train-fn <module:fn>` -- custom training function (overrides `--config`)
+- `--run-dir <path>` -- run directory (default: auto-created temp dir)
+- `--host <addr>` -- dashboard bind address (default: `127.0.0.1`)
+- `--port <int>` -- dashboard port (default: `8421`)
+- `--max-steps <int>` -- override max training steps
+- `--max-time <float>` -- wall-clock time limit in seconds (stops training when reached, regardless of step count)
+- `--step-delay <float>` -- seconds between steps
+- `--autopilot {off,suggest,auto,ai_suggest,ai_auto}` -- autopilot mode (default: `off`)
+- `--key-metric <name>` -- primary metric for AI optimization (default: `val_loss`)
+- `--ai-model <name>` -- LLM model name (default: `gpt-4o-mini`)
+- `--ai-budget <float>` -- max USD for LLM calls (default: `5.0`)
+- `--ai-cadence <int>` -- steps between AI check-ins (default: `50`)
+- `--seed <int>` -- random seed
+
+`--max-steps` and `--max-time` can be combined — whichever limit is hit first wins. This is useful when step duration varies across hardware (e.g. `--max-time 300` for a 5-minute run regardless of GPU speed).
+
+The training function must conform to the hotcb contract:
+
+```python
+def train_fn(run_dir, max_steps, step_delay, stop_event):
+    # Write metrics to {run_dir}/hotcb.metrics.jsonl
+    # Read commands from {run_dir}/hotcb.commands.jsonl
+    ...
+```
+
+## `hotcb bench`
+
+Run synthetic benchmarks or CIFAR-10 autopilot evaluation.
+
+```bash
+hotcb bench run                         # synthetic benchmarks
+hotcb bench eval                        # CIFAR-10 autopilot evaluation
+```
+
 ## Key-Value Parsing
 
 All `k=v` arguments support automatic type inference:

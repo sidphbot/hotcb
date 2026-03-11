@@ -54,8 +54,73 @@ async function initialLoad() {
 
   // Autopilot mode
   var ap = await api('GET', '/api/autopilot/mode');
-  if (ap && ap.mode) $('#autopilotMode').value = ap.mode;
+  if (ap && ap.mode) {
+    $('#autopilotMode').value = ap.mode;
+    _updateAIConfigVisibility(ap.mode);
+  }
   pollAutopilotStatus();
+
+  // Restore controls from server state (overrides stale localStorage)
+  var ctrlState = await api('GET', '/api/state/controls');
+  if (ctrlState) {
+    // Sync sliders from latest metrics
+    var m = ctrlState.latest_metrics || {};
+    if (m.lr && m.lr > 0) {
+      var lrSlider = document.getElementById('knobLr');
+      var lrDisplay = document.getElementById('knobLrVal');
+      if (lrSlider && lrDisplay) {
+        lrSlider.value = Math.log10(m.lr);
+        lrDisplay.value = m.lr.toExponential(2);
+      }
+    }
+    if (m.weight_decay && m.weight_decay > 0) {
+      var wdSlider = document.getElementById('knobWd');
+      var wdDisplay = document.getElementById('knobWdVal');
+      if (wdSlider && wdDisplay) {
+        wdSlider.value = Math.log10(m.weight_decay);
+        wdDisplay.value = m.weight_decay.toExponential(2);
+      }
+    }
+    // Sync from last applied opt params as fallback
+    var op = ctrlState.last_opt_params || {};
+    if (!m.lr && op.lr && op.lr > 0) {
+      var lrSlider = document.getElementById('knobLr');
+      var lrDisplay = document.getElementById('knobLrVal');
+      if (lrSlider && lrDisplay) {
+        lrSlider.value = Math.log10(op.lr);
+        lrDisplay.value = op.lr.toExponential(2);
+      }
+    }
+    // Sync training config
+    var rc = ctrlState.run_config || {};
+    if (rc.config_id) {
+      var sel = document.getElementById('trainConfig');
+      if (sel) {
+        sel.value = rc.config_id;
+        _updateConfigControls(rc.config_id);
+      }
+    }
+    if (rc.max_steps) {
+      var msEl = document.getElementById('trainMaxSteps');
+      if (msEl) msEl.value = rc.max_steps;
+    }
+    if (rc.step_delay !== undefined) {
+      var sdEl = document.getElementById('trainStepDelay');
+      if (sdEl) sdEl.value = rc.step_delay;
+    }
+    if (rc.seed !== undefined && rc.seed !== null) {
+      var seedEl = document.getElementById('trainSeed');
+      if (seedEl) seedEl.value = rc.seed;
+    }
+    // Step counter
+    if (ctrlState.latest_step) {
+      var stepEl = document.getElementById('stepValue');
+      if (stepEl) stepEl.textContent = ctrlState.latest_step;
+    }
+  }
+
+  // Load training capabilities and adapt controls
+  loadCapabilities();
 
   // Periodic updates
   startForecastPolling();

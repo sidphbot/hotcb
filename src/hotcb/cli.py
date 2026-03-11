@@ -328,23 +328,77 @@ def cmd_bench_eval(args: argparse.Namespace) -> None:
 
 def cmd_serve(args: argparse.Namespace) -> None:
     """Start the dashboard server."""
-    from .server.app import run_server
+    from .server.app import run_server, create_app
 
     multi_dirs = None
     if args.dirs:
         multi_dirs = [d.strip() for d in args.dirs.split(",") if d.strip()]
 
-    run_server(
-        run_dir=args.dir,
-        host=args.host,
-        port=args.port,
-        poll_interval=args.poll_interval,
-        multi_dirs=multi_dirs,
-    )
+    autopilot_mode = getattr(args, "autopilot", None)
+    key_metric = getattr(args, "key_metric", None)
+
+    if autopilot_mode and autopilot_mode != "off":
+        # Need to create app manually to configure autopilot before start
+        import uvicorn
+
+        app = create_app(
+            args.dir,
+            poll_interval=args.poll_interval,
+            multi_dirs=multi_dirs,
+        )
+
+        # Configure autopilot
+        ap_engine = app.state.autopilot_engine
+        ai_engine = getattr(app.state, "ai_engine", None)
+
+        if key_metric and ai_engine:
+            ai_engine.state.key_metric = key_metric
+            ai_engine.save_state()
+
+        try:
+            ap_engine.set_mode(autopilot_mode)
+            print(f"Autopilot mode: {autopilot_mode}")
+            if key_metric:
+                print(f"Key metric: {key_metric}")
+        except ValueError as e:
+            print(f"Warning: {e}")
+
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    else:
+        run_server(
+            run_dir=args.dir,
+            host=args.host,
+            port=args.port,
+            poll_interval=args.poll_interval,
+            multi_dirs=multi_dirs,
+        )
 
 
 def cmd_demo(args: argparse.Namespace) -> None:
     """Launch a demo: synthetic training + live dashboard."""
+    autopilot = getattr(args, "autopilot", "off")
+    key_metric = getattr(args, "key_metric", None)
+
+    if autopilot != "off":
+        # Use launch() API to get autopilot wired before training starts
+        from .launch import launch
+
+        config = "multitask" if args.golden else "simple"
+        handle = launch(
+            config=config,
+            run_dir=args.demo_dir if args.demo_dir else None,
+            autopilot=autopilot,
+            key_metric=key_metric or "val_loss",
+            max_steps=args.max_steps,
+            max_time=getattr(args, "max_time", None),
+            step_delay=args.step_delay,
+            host=args.host,
+            port=args.port,
+            serve=True,
+            block=True,
+        )
+        return
+
     if args.golden:
         from .golden_demo import run_golden_demo
 
@@ -365,6 +419,45 @@ def cmd_demo(args: argparse.Namespace) -> None:
             step_delay=args.step_delay,
             run_dir=args.demo_dir if args.demo_dir else None,
         )
+
+
+def cmd_launch(args: argparse.Namespace) -> None:
+    """Launch training + dashboard + autopilot in one command."""
+    from .launch import launch
+
+    import sys
+
+    train_fn = getattr(args, "train_fn", None)
+    config = getattr(args, "config", "multitask")
+
+    w = sys.stderr.write
+    w("\n")
+    w("  hotcb launch\n")
+    w(f"  autopilot: {args.autopilot}\n")
+    if args.key_metric:
+        w(f"  key metric: {args.key_metric}\n")
+    w(f"  dashboard: http://{args.host}:{args.port}\n")
+    w("\n")
+
+    handle = launch(
+        train_fn=train_fn,
+        config=config,
+        config_file=getattr(args, "config_file", None),
+        run_dir=args.dir if args.dir != "." else None,
+        autopilot=args.autopilot,
+        key_metric=args.key_metric or "val_loss",
+        ai_model=getattr(args, "ai_model", "gpt-4o-mini"),
+        ai_budget=getattr(args, "ai_budget", 5.0),
+        ai_cadence=getattr(args, "ai_cadence", 50),
+        max_steps=args.max_steps,
+        max_time=getattr(args, "max_time", None),
+        step_delay=args.step_delay,
+        host=args.host,
+        port=args.port,
+        seed=getattr(args, "seed", None),
+        serve=True,
+        block=True,
+    )
 
 
 def cmd_tune_export_recipe(args: argparse.Namespace) -> None:
@@ -633,8 +726,12 @@ def build_parser() -> argparse.ArgumentParser:
     pdemo.add_argument("--host", default="0.0.0.0", help="Bind host")
     pdemo.add_argument("--port", type=int, default=8421, help="Bind port")
     pdemo.add_argument("--max-steps", type=int, default=500, help="Number of training steps")
+    pdemo.add_argument("--max-time", type=float, default=None, help="Wall-clock time limit in seconds (stops training when reached)")
     pdemo.add_argument("--step-delay", type=float, default=0.15, help="Seconds between steps")
     pdemo.add_argument("--demo-dir", default=None, help="Run directory (default: temp dir)")
+    pdemo.add_argument("--autopilot", choices=["off", "suggest", "auto", "ai_suggest", "ai_auto"],
+                        default="off", help="Start with autopilot mode enabled")
+    pdemo.add_argument("--key-metric", default=None, help="Primary optimization metric for AI autopilot")
     pdemo.set_defaults(func=cmd_demo)
 
     pserve = sub.add_parser("serve", help="Start the live dashboard server")
@@ -642,7 +739,28 @@ def build_parser() -> argparse.ArgumentParser:
     pserve.add_argument("--port", type=int, default=8421, help="Bind port")
     pserve.add_argument("--poll-interval", type=float, default=0.5, help="JSONL poll interval (seconds)")
     pserve.add_argument("--dirs", help="Comma-separated additional run dirs for multi-run comparison")
+    pserve.add_argument("--autopilot", choices=["off", "suggest", "auto", "ai_suggest", "ai_auto"],
+                         default="off", help="Start with autopilot mode enabled (server only, no training)")
+    pserve.add_argument("--key-metric", default=None, help="Primary optimization metric for AI autopilot")
     pserve.set_defaults(func=cmd_serve)
+
+    plaunch = sub.add_parser("launch", help="Start training + dashboard + autopilot in one command")
+    plaunch.add_argument("--config", default="multitask", help="Built-in config: simple, multitask, finetune")
+    plaunch.add_argument("--config-file", default=None, help="Path to hotcb.launch.json (values used as defaults, CLI flags override)")
+    plaunch.add_argument("--train-fn", default=None, help="Custom training function (module.path:fn_name)")
+    plaunch.add_argument("--host", default="0.0.0.0", help="Bind host")
+    plaunch.add_argument("--port", type=int, default=8421, help="Bind port")
+    plaunch.add_argument("--max-steps", type=int, default=800, help="Number of training steps")
+    plaunch.add_argument("--max-time", type=float, default=None, help="Wall-clock time limit in seconds (stops training when reached)")
+    plaunch.add_argument("--step-delay", type=float, default=0.12, help="Seconds between steps")
+    plaunch.add_argument("--autopilot", choices=["off", "suggest", "auto", "ai_suggest", "ai_auto"],
+                          default="off", help="Autopilot mode")
+    plaunch.add_argument("--key-metric", default="val_loss", help="Primary optimization metric")
+    plaunch.add_argument("--ai-model", default="gpt-4o-mini", help="LLM model for AI autopilot")
+    plaunch.add_argument("--ai-budget", type=float, default=5.0, help="Max USD for AI calls")
+    plaunch.add_argument("--ai-cadence", type=int, default=50, help="Steps between AI check-ins")
+    plaunch.add_argument("--seed", type=int, default=None, help="Random seed")
+    plaunch.set_defaults(func=cmd_launch)
 
     ptune = sub.add_parser("tune", help="Tune module control")
     tune_sub = ptune.add_subparsers(dest="tune_command", required=True)

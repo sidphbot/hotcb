@@ -146,7 +146,7 @@ class TestMissingOptimizer:
         result = ctrl.apply_op(_op(params={"lr": 1e-4}), env)
 
         assert result.decision == "failed"
-        assert result.error == "missing_optimizer"
+        assert "missing_optimizer" in result.error
 
 
 # ------------------------------------------------------------------ #

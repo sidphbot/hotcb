@@ -19,6 +19,10 @@ runs/<run_id>/
   hotcb.tune.segments.jsonl    # tune evaluation segments (written by hottune)
   hotcb.tune.summary.json      # tune run summary (written at run end)
   hotcb.tune.study.sqlite      # optuna study state (optional)
+  hotcb.metrics.jsonl          # training metrics stream (dashboard/autopilot)
+  hotcb.features.jsonl         # activation capture data (optional)
+  hotcb.run.json               # run metadata (launch API)
+  hotcb.ai.state.json          # AI autopilot state (multi-run memory)
 ```
 
 ## `hotcb.commands.jsonl`
@@ -237,3 +241,105 @@ loss:
 ```
 
 YAML-derived ops are recorded in the ledger with `source="yaml"`.
+
+## `hotcb.metrics.jsonl`
+
+Append-only JSONL file written by `MetricsCollector` or training functions. Each line records metrics at a training step.
+
+### Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step` | int | Training step |
+| `metrics` | object | Metric name-value pairs (e.g. `{"loss": 0.45, "lr": 0.001}`) |
+
+### Example
+
+```json
+{"step": 100, "metrics": {"loss": 0.45, "lr": 0.001, "val_loss": 0.52, "grad_norm": 1.23}}
+```
+
+## `hotcb.features.jsonl`
+
+Optional JSONL file written by `FeatureCapture` for activation hook data.
+
+### Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step` | int | Training step |
+| `layer` | string | Layer name |
+| `stats` | object | Activation statistics (mean, std, min, max, etc.) |
+
+## `hotcb.run.json`
+
+Single JSON file written by the launch API at run start.
+
+### Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `run_id` | string | Timestamp-based run ID |
+| `config` | string | Config name or training function |
+| `max_steps` | int | Maximum training steps |
+| `step_delay` | float | Seconds between steps |
+| `seed` | int/null | Random seed |
+| `autopilot` | string | Autopilot mode |
+| `key_metric` | string | Primary optimization metric |
+| `started_at` | string | ISO timestamp |
+| `run_dir` | string | Run directory path |
+
+### Example
+
+```json
+{
+  "run_id": "20250311_143022",
+  "config": "multitask",
+  "max_steps": 1000,
+  "step_delay": 0.12,
+  "seed": 42,
+  "autopilot": "ai_suggest",
+  "key_metric": "val_loss",
+  "started_at": "2025-03-11T14:30:22",
+  "run_dir": "/tmp/hotcb_run_abc123"
+}
+```
+
+## `hotcb.ai.state.json`
+
+AI autopilot state file. Persists across dashboard restarts and carries learnings across multi-run sessions.
+
+### Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `key_metric` | string | Primary optimization target |
+| `watch_metrics` | list[string] | Additional metrics to monitor closely |
+| `run_number` | int | Current run number (1-indexed) |
+| `max_runs` | int | Maximum runs before AI stops proposing reruns |
+| `run_history` | list[object] | Previous run summaries with verdicts and learnings |
+| `carried_context` | string | Free-text context carried from previous runs |
+| `next_check_step` | int/null | AI-requested next check-in step |
+| `cadence_override` | int/null | AI-requested cadence override |
+
+### Example
+
+```json
+{
+  "key_metric": "val_loss",
+  "watch_metrics": ["grad_norm"],
+  "run_number": 2,
+  "max_runs": 3,
+  "run_history": [
+    {
+      "run_id": "run_001",
+      "final_key_metric": 0.45,
+      "ai_verdict": "degenerate_early — lr too high",
+      "carried_learnings": ["lr > 1e-3 causes divergence by step 200"]
+    }
+  ],
+  "carried_context": "Previous run diverged at step 200 with lr=1e-3.",
+  "next_check_step": null,
+  "cadence_override": null
+}
+```

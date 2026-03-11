@@ -119,3 +119,80 @@ All mutations happen at **safe points** -- stable boundaries in the training loo
 - **Bare torch:** wherever you call `kernel.apply()`
 
 The kernel never reaches into the optimizer or loss state at an unsafe moment. Your adapter controls when `kernel.apply()` is called, and the kernel applies all pending ops at that instant.
+
+## Dashboard
+
+The dashboard (`hotcb serve`) is a FastAPI app that provides real-time visualization and control:
+
+- **Live metric charts**: per-metric pinnable cards with forecast and what-if overlays
+- **Command panel**: send optimizer/loss/callback commands from the browser
+- **Recipe editor**: view and edit the applied ledger
+- **Autopilot controls**: mode selector, rule configuration, AI reasoning panel
+
+The dashboard communicates with training via the filesystem (same JSONL files). It runs in a separate process — no shared memory or sockets needed.
+
+## Autopilot
+
+The autopilot system has two layers:
+
+### Rule-based autopilot (`suggest` / `auto`)
+
+Condition-action rules that monitor metrics and fire when patterns are detected:
+- **Plateau**: metric flat for N steps → reduce lr
+- **Divergence**: metric rising sharply → reduce lr aggressively
+- **Overfitting**: val_loss rising while train_loss falls → increase weight_decay
+
+In `suggest` mode, proposals appear in the dashboard for human review. In `auto` mode, actions apply immediately.
+
+### AI autopilot (`ai_suggest` / `ai_auto`)
+
+An LLM reads metric trends, rule alerts, and action history, then decides what to do. The rule engine acts as the "sensor layer" — it still runs in AI modes, but fires alerts instead of actions.
+
+Key features:
+
+- **Compressed trend context**: `TrendCompressor` reduces raw metrics to slope/volatility/direction summaries for token-efficient LLM prompts
+- **Key metric**: primary optimization target (e.g. `val_loss`). The AI can change it mid-run if a different signal is more informative.
+- **AI-driven cadence**: the LLM controls when it's next consulted — "check back at step 500" or "check in 20 steps"
+- **Multi-run memory**: `hotcb.ai.state.json` carries learnings (what worked, what failed) across 2-3 runs
+- **Budget cap**: configurable USD limit. Falls back to rule-based when exhausted.
+- **13 constrained actions**: `set_lr`, `reduce_lr_factor`, `set_wd`, `set_loss_weight`, `set_key_metric`, `declare_rerun`, `finalize_recipe`, `noop`, etc. — all with param bounds validation
+
+Configuration:
+- `HOTCB_AI_KEY` env var: API key for LLM provider
+- Works with any OpenAI-compatible endpoint (OpenAI, ollama, vLLM)
+- Configure via CLI (`--ai-model`, `--ai-budget`, `--ai-cadence`) or REST API
+
+## Metrics Collection
+
+`MetricsCollector` writes training metrics to `hotcb.metrics.jsonl`:
+
+```python
+from hotcb.metrics import MetricsCollector
+
+mc = MetricsCollector("runs/exp1/hotcb.metrics.jsonl")
+mc.log(step=100, metrics={"loss": 0.45, "lr": 0.001, "val_loss": 0.52})
+```
+
+The dashboard tails this file for live charts. The autopilot reads it for trend analysis.
+
+## Programmatic Launch API
+
+`hotcb.launch` provides a single entry point to start training + dashboard + autopilot:
+
+```python
+from hotcb.launch import launch
+
+handle = launch(
+    train_fn="my_module:train",
+    autopilot="ai_suggest",
+    key_metric="val_loss",
+    serve=True,
+)
+```
+
+`LaunchHandle` provides:
+- `metrics()` / `latest_metrics()` / `metric_history(name)` — read metrics
+- `set_param()` / `set_loss()` / `send_command()` — send live commands
+- `ai_status()` — read AI autopilot state
+- `wait()` / `stop()` — lifecycle control
+- `running` — check if training is active
