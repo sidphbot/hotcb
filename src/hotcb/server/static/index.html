@@ -38,7 +38,6 @@
 <select class="header-select" id="freezeSelect" title="Freeze Mode">
       <option value="off">Live</option>
       <option value="prod">Frozen</option>
-      <option value="replay">Replay</option>
     </select>
     <button class="btn btn-sm" id="btnTour" title="Show guided tour">Tour</button>
     <button class="btn btn-sm" id="btnCallHelp" title="Send training snapshot for help">SOS</button>
@@ -58,6 +57,7 @@
       <div class="tab active" data-tab="metrics">Metrics</div>
       <div class="tab" data-tab="manifold">Manifold</div>
       <div class="tab" data-tab="recipe-editor">Recipe</div>
+      <div class="tab" data-tab="autopilot-rules">Autopilot</div>
       <div class="tab" data-tab="config-wizard">Config</div>
       <div class="tab" data-tab="compare">Compare</div>
     </div>
@@ -110,6 +110,52 @@
       <div style="flex:1;overflow-y:auto;padding:4px 8px;" id="recipeList"></div>
       <div id="recipeReplayPreview" style="display:none;padding:8px;overflow-y:auto;max-height:40%;border-top:1px solid var(--border)"></div>
       <div id="recipeDiffView" style="display:none;padding:8px;overflow-y:auto;max-height:40%;border-top:1px solid var(--border)"></div>
+    </div>
+
+    <!-- TAB: Autopilot Rules Editor -->
+    <div class="tab-content" data-tab="autopilot-rules">
+      <div class="chart-toolbar">
+        <span style="font-size:10px;color:var(--text-muted)">Autopilot Rules Editor</span>
+        <div class="btn-group">
+          <button class="btn btn-sm btn-accent" id="btnRuleAdd">+ Add Rule</button>
+          <button class="btn btn-sm" id="btnRulesReload">Reload Defaults</button>
+        </div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:4px 8px;" id="autopilotRulesList"></div>
+    </div>
+
+    <!-- Modal: Add Rule -->
+    <div class="modal-overlay" id="modalRuleAdd">
+      <div class="modal">
+        <h3>Add Autopilot Rule</h3>
+        <label>Rule ID</label>
+        <input id="ruleId" placeholder="e.g. my_custom_rule">
+        <label>Condition</label>
+        <select id="ruleCondition">
+          <option value="plateau">plateau</option>
+          <option value="divergence">divergence</option>
+          <option value="overfitting">overfitting</option>
+          <option value="custom">custom</option>
+        </select>
+        <label>Metric</label>
+        <input id="ruleMetric" placeholder="e.g. train_loss">
+        <label>Confidence</label>
+        <select id="ruleConfidence">
+          <option value="high">high</option>
+          <option value="medium" selected>medium</option>
+          <option value="low">low</option>
+        </select>
+        <label>Condition Params (JSON)</label>
+        <input id="ruleParams" placeholder='{"window": 20, "threshold": 0.001}'>
+        <label>Action (JSON)</label>
+        <input id="ruleAction" placeholder='{"module": "opt", "op": "set_params", "params": {"lr_mult": 0.5}}'>
+        <label>Description</label>
+        <input id="ruleDescription" placeholder="Human-readable description">
+        <div class="modal-actions">
+          <button class="btn" onclick="closeModal('modalRuleAdd')">Cancel</button>
+          <button class="btn btn-accent" id="btnRuleSubmit">Add</button>
+        </div>
+      </div>
     </div>
 
     <!-- TAB: Config Wizard -->
@@ -177,13 +223,19 @@
             <div style="font-size:10px;font-weight:700;color:var(--accent);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Training Function Contract</div>
             <div style="font-size:10px;color:var(--text-secondary);line-height:1.5">
               Your function must accept 4 positional args:<br>
-              <code style="color:var(--cyan);font-size:10px">(run_dir, max_steps, step_delay, stop_event)</code>
-              <div style="margin-top:6px;display:grid;gap:3px;">
-                <span>1. Check <code style="color:var(--cyan)">stop_event.is_set()</code> each step</span>
-                <span>2. Write metrics to <code style="color:var(--cyan)">{run_dir}/hotcb.metrics.jsonl</code></span>
-                <span style="margin-left:12px;color:var(--text-muted)">Format: <code>{"step": N, "metrics": {"loss": 0.5, "lr": 0.001}}</code></span>
-                <span>3. Read commands from <code style="color:var(--cyan)">{run_dir}/hotcb.commands.jsonl</code></span>
-                <span>4. Write applied mutations to <code style="color:var(--cyan)">{run_dir}/hotcb.applied.jsonl</code></span>
+              <code style="color:var(--cyan);font-size:10px">def train_fn(run_dir, max_steps, step_delay, stop_event)</code>
+              <div style="margin-top:6px;display:grid;gap:4px;">
+                <span><b style="color:var(--text-primary)">stop_event</b> is a <code style="color:var(--cyan)">threading.Event</code> (stdlib). Check <code style="color:var(--cyan)">stop_event.is_set()</code> each step to allow graceful shutdown from the dashboard. No extra imports needed beyond <code style="color:var(--cyan)">import threading</code>.</span>
+                <span><b style="color:var(--text-primary)">step_delay</b> controls pacing for demo/simulation loops. For real training, this can be 0 — the dashboard tracks metrics by timestamp and step number, not by delay.</span>
+              </div>
+              <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">
+                <div style="font-size:9px;font-weight:700;color:var(--text-muted);margin-bottom:3px;text-transform:uppercase">JSONL I/O Files</div>
+                <div style="display:grid;gap:3px;">
+                  <span>1. Write metrics to <code style="color:var(--cyan)">{run_dir}/hotcb.metrics.jsonl</code></span>
+                  <span style="margin-left:12px;color:var(--text-muted)">Format: <code>{"step": N, "metrics": {"loss": 0.5, "lr": 0.001}}</code></span>
+                  <span>2. Read commands from <code style="color:var(--cyan)">{run_dir}/hotcb.commands.jsonl</code></span>
+                  <span>3. Write applied mutations to <code style="color:var(--cyan)">{run_dir}/hotcb.applied.jsonl</code></span>
+                </div>
               </div>
             </div>
           </div>
@@ -200,12 +252,18 @@
     <!-- TAB: Compare Runs -->
     <div class="tab-content" data-tab="compare">
       <div class="chart-toolbar">
-        <span style="font-size:10px;color:var(--text-muted)">Experiment Comparison</span>
-        <button class="btn btn-sm btn-accent" id="btnCompareRefresh">Refresh Runs</button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:10px;color:var(--text-muted)">Experiment Comparison</span>
+          <div id="compareMetricToggles" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-sm" id="btnCompareZoom" title="Expand chart fullscreen">&#x26F6; Zoom</button>
+          <button class="btn btn-sm btn-accent" id="btnCompareRefresh">Refresh Runs</button>
+        </div>
       </div>
-      <div style="display:flex;flex:1;overflow:hidden;">
+      <div style="display:flex;flex:1;overflow:hidden;" id="compareBody">
         <!-- Run list sidebar -->
-        <div style="width:220px;border-right:1px solid var(--border);overflow-y:auto;padding:8px;flex-shrink:0;">
+        <div style="width:220px;border-right:1px solid var(--border);overflow-y:auto;padding:8px;flex-shrink:0;" id="compareSidebar">
           <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;letter-spacing:0.5px">Select Runs to Compare</div>
           <div id="compareRunList" style="display:flex;flex-direction:column;gap:4px;"></div>
         </div>
@@ -213,6 +271,8 @@
         <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
           <div style="flex:1;position:relative;min-height:0;padding:6px;">
             <canvas id="compareChart"></canvas>
+            <!-- Run info overlay (visible in zoom mode) -->
+            <div id="compareOverlayInfo" style="display:none;position:absolute;top:8px;right:8px;font-size:9px;font-family:var(--font-mono);color:var(--text-muted);background:rgba(0,0,0,0.6);padding:6px 10px;border-radius:4px;z-index:10;max-width:200px;"></div>
           </div>
           <!-- Summary table -->
           <div id="compareSummary" style="border-top:1px solid var(--border);padding:8px;max-height:150px;overflow-y:auto;font-size:10px;font-family:var(--font-mono);"></div>
@@ -356,6 +416,13 @@
         <label style="color:var(--text-muted)">Delay</label>
         <input type="number" id="trainStepDelay" value="0.12" min="0.01" max="5" step="0.01" style="width:55px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
         <span style="color:var(--text-muted)">s</span>
+        <label style="color:var(--text-muted)">Seed</label>
+        <input type="number" id="trainSeed" placeholder="auto" min="0" max="2147483647" style="width:65px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+      </div>
+      <div style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:10px;">
+        <input type="checkbox" id="trainLoadRecipe" style="accent-color:var(--accent);width:12px;height:12px;">
+        <label for="trainLoadRecipe" style="color:var(--text-secondary);cursor:pointer">Load recipe with config</label>
+        <span id="trainRecipeStatus" style="color:var(--text-muted);font-size:9px;font-style:italic"></span>
       </div>
     </div>
   </div>

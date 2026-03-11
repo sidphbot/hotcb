@@ -223,6 +223,18 @@ class AutopilotEngine:
             log.info("[hotcb.autopilot] rule removed: %s", rule_id)
         return removed is not None
 
+    def update_rule(self, rule_id: str, changes: dict) -> Optional[AutopilotRule]:
+        """Update an existing rule's fields. Returns updated rule or None."""
+        rule = self._rules.get(rule_id)
+        if rule is None:
+            return None
+        for key in ("condition", "metric_name", "params", "action",
+                     "confidence", "enabled", "description"):
+            if key in changes:
+                setattr(rule, key, changes[key])
+        log.info("[hotcb.autopilot] rule updated: %s", rule_id)
+        return rule
+
     def get_rules(self) -> list[AutopilotRule]:
         return list(self._rules.values())
 
@@ -489,6 +501,32 @@ def create_router(engine: Optional[AutopilotEngine] = None) -> Any:
         _engine.add_rule(rule)
         return {"status": "added", "rule_id": rule.rule_id}
 
+    class RuleUpdateRequest(BaseModel):
+        condition: Optional[str] = None
+        metric_name: Optional[str] = None
+        params: Optional[dict] = None
+        action: Optional[dict] = None
+        confidence: Optional[str] = None
+        enabled: Optional[bool] = None
+        description: Optional[str] = None
+
+    @router.put("/rules/{rule_id}")
+    async def update_rule(rule_id: str, body: RuleUpdateRequest):
+        changes = {k: v for k, v in body.dict().items() if v is not None}
+        updated = _engine.update_rule(rule_id, changes)
+        if updated is None:
+            return JSONResponse(status_code=404, content={"error": f"Rule {rule_id!r} not found"})
+        return {"status": "updated", "rule": asdict(updated)}
+
+    @router.post("/rules/{rule_id}/toggle")
+    async def toggle_rule(rule_id: str):
+        rules = {r.rule_id: r for r in _engine.get_rules()}
+        rule = rules.get(rule_id)
+        if rule is None:
+            return JSONResponse(status_code=404, content={"error": f"Rule {rule_id!r} not found"})
+        rule.enabled = not rule.enabled
+        return {"status": "toggled", "rule_id": rule_id, "enabled": rule.enabled}
+
     @router.delete("/rules/{rule_id}")
     async def remove_rule(rule_id: str):
         removed = _engine.remove_rule(rule_id)
@@ -499,7 +537,11 @@ def create_router(engine: Optional[AutopilotEngine] = None) -> Any:
     @router.post("/guidelines")
     async def load_guidelines_endpoint(body: GuidelinesRequest):
         try:
-            count = _engine.load_guidelines(body.path)
+            path = body.path
+            if path == "__default__":
+                from .guidelines import DEFAULT_GUIDELINES_PATH
+                path = DEFAULT_GUIDELINES_PATH
+            count = _engine.load_guidelines(path)
             return {"status": "loaded", "rules_loaded": count}
         except Exception as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})

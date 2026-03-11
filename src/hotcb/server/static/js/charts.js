@@ -21,13 +21,42 @@ var mutationAnnotationPlugin = {
     var top = yScale.top;
     var bottom = yScale.bottom;
 
+    // Collect visible annotations with pixel positions for staggering
+    var annotations = [];
     S.appliedData.forEach(function(rec) {
       var step = rec.step;
       if (step === undefined || step === null) return;
       if (step < xScale.min || step > xScale.max) return;
       var x = xScale.getPixelForValue(step);
+      annotations.push({rec: rec, x: x, step: step});
+    });
 
-      var isHighlighted = (_highlightedMutationStep === step);
+    // Sort by x position for overlap detection
+    annotations.sort(function(a, b) { return a.x - b.x; });
+
+    // Assign stagger rows: if labels overlap horizontally, push down
+    var rowHeight = 15;
+    var maxRows = 4;
+    for (var i = 0; i < annotations.length; i++) {
+      annotations[i].row = 0;
+      // Check overlap with previously placed labels
+      for (var r = 0; r < maxRows; r++) {
+        var overlaps = false;
+        for (var j = 0; j < i; j++) {
+          if (annotations[j].row === r && Math.abs(annotations[i].x - annotations[j].x) < 70) {
+            overlaps = true;
+            break;
+          }
+        }
+        if (!overlaps) { annotations[i].row = r; break; }
+        annotations[i].row = r + 1;
+      }
+    }
+
+    annotations.forEach(function(ann) {
+      var rec = ann.rec;
+      var x = ann.x;
+      var isHighlighted = (_highlightedMutationStep === ann.step);
 
       // Draw vertical dashed line
       ctx.save();
@@ -42,49 +71,54 @@ var mutationAnnotationPlugin = {
       ctx.stroke();
       ctx.restore();
 
-      // Build compact label from params
-      var label = '';
+      // Build compact label — split into multiple lines if needed
+      var lines = [];
       if (rec.params && typeof rec.params === 'object') {
         var keys = Object.keys(rec.params);
-        var parts = [];
-        keys.slice(0, 2).forEach(function(k) {
+        keys.slice(0, 3).forEach(function(k) {
           var v = rec.params[k];
           if (typeof v === 'number') {
             v = v < 0.01 || v > 1e4 ? v.toExponential(1) : parseFloat(v.toPrecision(3));
           }
-          parts.push(k + '\u2192' + v);
+          lines.push(k + '\u2192' + v);
         });
-        label = parts.join(', ');
       } else if (rec.op) {
-        label = rec.op;
+        lines.push(rec.op);
       }
 
-      if (label) {
+      if (lines.length > 0) {
         ctx.save();
         ctx.font = (isHighlighted ? 'bold ' : '') + '9px "JetBrains Mono", monospace';
-        var textWidth = ctx.measureText(label).width;
         var pad = 3;
-        var labelX = x - textWidth / 2 - pad;
-        var labelY = top - 2;
+        var lineH = 11;
+        var baseY = top - 2 - ann.row * rowHeight;
 
-        // Background pill
-        ctx.fillStyle = isHighlighted
-          ? 'rgba(255, 152, 51, 0.25)'
-          : 'rgba(255, 152, 51, 0.12)';
-        ctx.beginPath();
-        if (ctx.roundRect) {
-          ctx.roundRect(labelX, labelY - 11, textWidth + pad * 2, 13, 3);
-        } else {
-          ctx.rect(labelX, labelY - 11, textWidth + pad * 2, 13);
+        // Draw each line stacked upward
+        for (var li = lines.length - 1; li >= 0; li--) {
+          var text = lines[li];
+          var textWidth = ctx.measureText(text).width;
+          var labelX = x - textWidth / 2 - pad;
+          var labelY = baseY - (lines.length - 1 - li) * lineH;
+
+          // Background pill
+          ctx.fillStyle = isHighlighted
+            ? 'rgba(255, 152, 51, 0.25)'
+            : 'rgba(255, 152, 51, 0.12)';
+          ctx.beginPath();
+          if (ctx.roundRect) {
+            ctx.roundRect(labelX, labelY - lineH, textWidth + pad * 2, lineH + 2, 3);
+          } else {
+            ctx.rect(labelX, labelY - lineH, textWidth + pad * 2, lineH + 2);
+          }
+          ctx.fill();
+
+          // Text
+          ctx.fillStyle = isHighlighted
+            ? 'rgba(255, 200, 120, 1)'
+            : 'rgba(255, 200, 120, 0.7)';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(text, labelX + pad, labelY);
         }
-        ctx.fill();
-
-        // Text
-        ctx.fillStyle = isHighlighted
-          ? 'rgba(255, 200, 120, 1)'
-          : 'rgba(255, 200, 120, 0.7)';
-        ctx.textBaseline = 'bottom';
-        ctx.fillText(label, labelX + pad, labelY);
         ctx.restore();
       }
     });
@@ -751,14 +785,29 @@ function focusMetricCard(name) {
 }
 
 // ---- Forecast fetching ----
+var _forecastInFlight = false;
+var _forecastPendingRefresh = false;
+var _lastForecastStep = 0;
 
 async function fetchAllForecasts() {
+  // Debounce: don't pile up concurrent forecast requests
+  if (_forecastInFlight) {
+    _forecastPendingRefresh = true;
+    return;
+  }
+  _forecastInFlight = true;
   var promises = [];
   S.metricNames.forEach(function(name) {
     promises.push(fetchForecastForMetric(name));
   });
   await Promise.all(promises);
+  _forecastInFlight = false;
   updateChart();
+  // If new data arrived while we were fetching, refresh again
+  if (_forecastPendingRefresh) {
+    _forecastPendingRefresh = false;
+    setTimeout(fetchAllForecasts, 500);
+  }
 }
 
 async function fetchForecastForMetric(name) {
@@ -770,8 +819,18 @@ async function fetchForecastForMetric(name) {
 
 function startForecastPolling() {
   if (_forecastTimer) clearInterval(_forecastTimer);
-  _forecastTimer = setInterval(fetchAllForecasts, 10000);
+  // Poll every 5s as a baseline, but also triggered on new metrics
+  _forecastTimer = setInterval(fetchAllForecasts, 5000);
   fetchAllForecasts();
+}
+
+// Called from websocket when new metrics arrive — trigger forecast refresh
+function onNewMetricsForForecast(maxStep) {
+  // Only trigger every 10 steps to avoid flooding
+  if (maxStep - _lastForecastStep >= 10) {
+    _lastForecastStep = maxStep;
+    fetchAllForecasts();
+  }
 }
 
 // Keep old function name for compatibility

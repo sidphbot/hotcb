@@ -88,12 +88,27 @@ def _get_builtin_configs() -> List[TrainingConfig]:
     ]
 
 
+def _seed_run(run_dir: str) -> None:
+    """Seed random from run metadata so runs are reproducible by config+seed."""
+    import random as _rng
+    run_json = os.path.join(run_dir, "hotcb.run.json")
+    seed = int(time.time() * 1000) & 0xFFFFFFFF
+    try:
+        with open(run_json) as f:
+            meta = json.load(f)
+        seed = meta.get("seed", seed)
+    except Exception:
+        pass
+    _rng.seed(seed)
+
+
 def _run_simple(
     run_dir: str,
     max_steps: int,
     step_delay: float,
     stop_event: threading.Event,
 ) -> None:
+    _seed_run(run_dir)
     from ..demo import _demo_training
     _demo_training(run_dir, max_steps=max_steps, step_delay=step_delay,
                    _stop_event=stop_event)
@@ -105,6 +120,7 @@ def _run_multitask(
     step_delay: float,
     stop_event: threading.Event,
 ) -> None:
+    _seed_run(run_dir)
     from ..golden_demo import _golden_training
     _golden_training(run_dir, max_steps=max_steps, step_delay=step_delay,
                      _stop_event=stop_event)
@@ -116,6 +132,7 @@ def _run_finetune(
     step_delay: float,
     stop_event: threading.Event,
 ) -> None:
+    _seed_run(run_dir)
     from ..finetune_demo import _finetune_training
     _finetune_training(run_dir, max_steps=max_steps, step_delay=step_delay,
                        _stop_event=stop_event)
@@ -158,6 +175,7 @@ class TrainingLauncher:
         max_steps: Optional[int] = None,
         step_delay: Optional[float] = None,
         run_dir: Optional[str] = None,
+        seed: Optional[int] = None,
     ) -> dict:
         if self.running:
             return {"error": "Training already running"}
@@ -169,6 +187,9 @@ class TrainingLauncher:
 
         effective_steps = max_steps if max_steps is not None else cfg.defaults["max_steps"]
         effective_delay = step_delay if step_delay is not None else cfg.defaults["step_delay"]
+        # Generate seed if not provided — makes runs reproducible
+        import random as _rng
+        effective_seed = seed if seed is not None else _rng.randint(0, 2**31 - 1)
 
         self._active_run_dir = run_dir or self._run_dir
         self._active_config_id = config_id
@@ -177,6 +198,7 @@ class TrainingLauncher:
             "config_name": cfg.name,
             "max_steps": effective_steps,
             "step_delay": effective_delay,
+            "seed": effective_seed,
         }
         self._stop_event.clear()
 
@@ -200,6 +222,7 @@ class TrainingLauncher:
             "config_name": cfg.name,
             "max_steps": effective_steps,
             "step_delay": effective_delay,
+            "seed": effective_seed,
             "started_at": self._started_at,
             "run_dir": self._active_run_dir,
         }
@@ -342,21 +365,30 @@ def create_router(launcher: Optional[TrainingLauncher] = None) -> Any:
         max_steps: Optional[int] = None
         step_delay: Optional[float] = None
         run_dir: Optional[str] = None
+        seed: Optional[int] = None
 
     @router.get("/configs")
     async def list_configs():
         return {"configs": _launcher.get_configs()}
 
     @router.post("/start")
-    async def start_training(body: StartRequest):
+    async def start_training(body: StartRequest, request: Request):
         result = _launcher.start(
             config_id=body.config_id,
             max_steps=body.max_steps,
             step_delay=body.step_delay,
             run_dir=body.run_dir,
+            seed=body.seed,
         )
         if "error" in result:
             return JSONResponse(status_code=409, content=result)
+        # Clear stale engine state from previous runs
+        projection = getattr(request.app.state, 'projection_engine', None)
+        if projection:
+            projection._steps.clear()
+            projection._metrics.clear()
+            projection._hp_keys.clear()
+            projection._hp_values.clear()
         return result
 
     @router.get("/status")
@@ -471,6 +503,50 @@ def create_router(launcher: Optional[TrainingLauncher] = None) -> Any:
         records = []
         if os.path.exists(metrics_path):
             with open(metrics_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            pass
+
+        return {"run_id": run_id, "records": records[-last_n:]}
+
+    @router.get("/runs/{run_id}/applied")
+    async def get_run_applied(run_id: str, last_n: int = 200):
+        """Get applied mutations from a specific run by its ID."""
+        run_dir = _launcher._run_dir
+        parent_dir = os.path.dirname(run_dir.rstrip("/"))
+
+        target_dir = None
+        run_json = os.path.join(run_dir, "hotcb.run.json")
+        if os.path.exists(run_json):
+            with open(run_json) as f:
+                meta = json.load(f)
+            if meta.get("run_id") == run_id:
+                target_dir = run_dir
+
+        if not target_dir and parent_dir:
+            history_path = os.path.join(parent_dir, "hotcb.runs.jsonl")
+            if os.path.exists(history_path):
+                with open(history_path) as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            if entry.get("run_id") == run_id and entry.get("run_dir"):
+                                target_dir = entry["run_dir"]
+                                break
+                        except Exception:
+                            pass
+
+        if not target_dir:
+            return JSONResponse(status_code=404, content={"error": f"Run {run_id} not found"})
+
+        applied_path = os.path.join(target_dir, "hotcb.applied.jsonl")
+        records = []
+        if os.path.exists(applied_path):
+            with open(applied_path) as f:
                 for line in f:
                     line = line.strip()
                     if line:

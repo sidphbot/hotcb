@@ -63,6 +63,8 @@ function connectWS() {
         });
         var stepEl = document.getElementById('stepValue');
         if (stepEl) stepEl.textContent = maxStep;
+        // Trigger forecast refresh on new data
+        if (typeof onNewMetricsForForecast === 'function') onNewMetricsForForecast(maxStep);
       }
 
       if (ch === 'applied') {

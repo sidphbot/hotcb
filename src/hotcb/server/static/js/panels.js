@@ -43,7 +43,18 @@ function initTabs() {
         _stopManifoldAutoRefresh();
       }
       if (t.dataset.tab === 'features') fetchFeatures();
-      if (t.dataset.tab === 'recipe-editor') fetchRecipe();
+      if (t.dataset.tab === 'recipe-editor') {
+        fetchRecipe();
+        _startRecipeAutoRefresh();
+      } else {
+        _stopRecipeAutoRefresh();
+      }
+      if (t.dataset.tab === 'autopilot-rules') {
+        fetchAutopilotRules();
+        _startRulesAutoRefresh();
+      } else {
+        _stopRulesAutoRefresh();
+      }
       if (t.dataset.tab === 'compare') fetchCompareRuns();
     });
   });
@@ -130,34 +141,54 @@ function addTimelineItem(rec) {
 }
 
 /* ================================================================ */
-/* Recipe Editor                                                     */
+/* Recipe Editor — live, editable, auto-refreshing                   */
 /* ================================================================ */
+var _recipeAutoRefresh = null;
+var _recipeEditingIdx = null;  // index being edited, or null
+
 async function fetchRecipe() {
   var data = await api('GET', '/api/recipe/');
-  if (!data || !data.entries) return;
-  S.recipeEntries = data.entries;
+  if (!data) return;
+  S.recipeEntries = data.entries || [];
+  // Don't re-render if user is actively editing an entry
+  if (_recipeEditingIdx !== null) return;
   renderRecipe();
+}
+
+function _startRecipeAutoRefresh() {
+  if (_recipeAutoRefresh) return;
+  _recipeAutoRefresh = setInterval(fetchRecipe, 5000);
+}
+function _stopRecipeAutoRefresh() {
+  if (_recipeAutoRefresh) { clearInterval(_recipeAutoRefresh); _recipeAutoRefresh = null; }
 }
 
 function renderRecipe() {
   var list = $('#recipeList');
   list.innerHTML = '';
   if (S.recipeEntries.length === 0) {
-    list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px">No recipe entries. Click + Add to create one.</div>';
+    list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px">No recipe entries. Click + Add to create one, or use Schedule from Controls.</div>';
     return;
   }
   S.recipeEntries.forEach(function(entry, idx) {
-    var step = entry.at ? entry.at.step : (entry.step || '?');
+    var step = entry.at_step !== undefined ? entry.at_step : (entry.at ? entry.at.step : (entry.step || '?'));
+    var mod = entry.module || '?';
+    var op = entry.op || '';
+    var params = entry.params ? JSON.stringify(entry.params) : '';
     var div = document.createElement('div');
     div.className = 'recipe-entry';
     div.draggable = true;
     div.dataset.idx = idx;
-    var params = entry.params ? JSON.stringify(entry.params) : '';
     div.innerHTML =
-      '<span style="color:var(--text-muted)">step ' + step + '</span>' +
-      '<span class="tl-module ' + (entry.module || '') + '">' + (entry.module || '?') + '</span>' +
-      '<span style="color:var(--text-secondary)">' + (entry.op || '') + ' ' + params + '</span>' +
-      '<button class="del-btn" data-idx="' + idx + '">&times;</button>';
+      '<span class="recipe-step" title="Click to edit step" style="color:var(--text-muted);cursor:pointer">step ' + step + '</span>' +
+      '<span class="tl-module ' + mod + '" title="Click to edit"  style="cursor:pointer">' + mod + '</span>' +
+      '<span class="recipe-detail" title="Click to edit" style="color:var(--text-secondary);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + op + ' ' + params + '</span>' +
+      '<div style="display:flex;gap:2px;flex-shrink:0">' +
+        '<button class="edit-btn" data-idx="' + idx + '" title="Edit" style="border:none;background:none;cursor:pointer;color:var(--text-muted);font-size:11px;padding:0 2px">\u270E</button>' +
+        '<button class="del-btn" data-idx="' + idx + '" title="Delete">&times;</button>' +
+      '</div>';
+
+    // Drag and drop
     div.addEventListener('dragstart', function(e) { e.dataTransfer.setData('text/plain', idx); div.classList.add('dragging'); });
     div.addEventListener('dragend', function() { div.classList.remove('dragging'); });
     div.addEventListener('dragover', function(e) { e.preventDefault(); });
@@ -168,11 +199,68 @@ function renderRecipe() {
       await api('POST', '/api/recipe/move', {from: fromIdx, to: idx});
       fetchRecipe();
     });
-    div.querySelector('.del-btn').addEventListener('click', async function() {
+
+    // Delete
+    div.querySelector('.del-btn').addEventListener('click', async function(e) {
+      e.stopPropagation();
       await api('DELETE', '/api/recipe/entry/' + idx);
       fetchRecipe();
     });
+
+    // Inline edit
+    div.querySelector('.edit-btn').addEventListener('click', function(e) {
+      e.stopPropagation();
+      _openInlineEdit(div, entry, idx);
+    });
+
     list.appendChild(div);
+  });
+}
+
+function _openInlineEdit(div, entry, idx) {
+  _recipeEditingIdx = idx;  // Lock auto-refresh from clobbering the form
+  var step = entry.at_step !== undefined ? entry.at_step : (entry.at ? entry.at.step : 0);
+  var mod = entry.module || 'opt';
+  var op = entry.op || 'set_params';
+  var params = entry.params ? JSON.stringify(entry.params, null, 0) : '{}';
+
+  div.classList.add('recipe-editing');
+  div.draggable = false;
+  div.innerHTML =
+    '<input type="number" class="re-step" value="' + step + '" style="width:50px;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px;font-family:var(--font-mono)">' +
+    '<select class="re-module" style="width:50px;font-size:10px;padding:2px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px">' +
+      '<option value="opt"' + (mod==='opt'?' selected':'') + '>opt</option>' +
+      '<option value="loss"' + (mod==='loss'?' selected':'') + '>loss</option>' +
+      '<option value="cb"' + (mod==='cb'?' selected':'') + '>cb</option>' +
+      '<option value="tune"' + (mod==='tune'?' selected':'') + '>tune</option>' +
+    '</select>' +
+    '<input type="text" class="re-op" value="' + op + '" placeholder="op" style="width:70px;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px;font-family:var(--font-mono)">' +
+    '<input type="text" class="re-params" value=\'' + params.replace(/'/g, '&#39;') + '\' placeholder=\'{"key":"val"}\' style="flex:1;min-width:60px;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px;font-family:var(--font-mono)">' +
+    '<div style="display:flex;gap:2px;flex-shrink:0">' +
+      '<button class="btn btn-sm btn-accent re-save" style="font-size:9px;padding:2px 6px">\u2713</button>' +
+      '<button class="btn btn-sm re-cancel" style="font-size:9px;padding:2px 6px">\u2715</button>' +
+    '</div>';
+
+  div.querySelector('.re-save').addEventListener('click', async function() {
+    var newStep = parseInt(div.querySelector('.re-step').value) || 0;
+    var newMod = div.querySelector('.re-module').value;
+    var newOp = div.querySelector('.re-op').value.trim() || 'set_params';
+    var newParams = {};
+    try { newParams = JSON.parse(div.querySelector('.re-params').value || '{}'); } catch(e) {}
+    _recipeEditingIdx = null;  // Unlock before fetch
+    await api('PUT', '/api/recipe/entry/' + idx, {changes: {
+      at_step: newStep, module: newMod, op: newOp, params: newParams
+    }});
+    fetchRecipe();
+  });
+  div.querySelector('.re-cancel').addEventListener('click', function() {
+    _recipeEditingIdx = null;  // Unlock before fetch
+    fetchRecipe();
+  });
+  // Save on Enter
+  div.querySelector('.re-params').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') div.querySelector('.re-save').click();
+    if (e.key === 'Escape') div.querySelector('.re-cancel').click();
   });
 }
 
@@ -207,7 +295,7 @@ function initRecipeEditor() {
     var data = await api('GET', '/api/recipe/timeline');
     if (!data || !data.timeline) { el.style.display = 'none'; return; }
     el.style.display = 'block';
-    el.innerHTML = '<div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:4px">REPLAY PREVIEW</div>';
+    el.innerHTML = '<div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:4px">TIMELINE PREVIEW</div>';
     data.timeline.forEach(function(t) {
       var d = document.createElement('div');
       d.className = 'timeline-item';
@@ -226,7 +314,6 @@ function initRecipeEditor() {
     var path = $('#recipeImportPath').value.trim();
 
     if (path) {
-      // Import from server file path
       var data = await api('POST', '/api/recipe/import', {path: path});
       if (data && !data.error) {
         closeModal('modalRecipeImport');
@@ -235,7 +322,6 @@ function initRecipeEditor() {
         alert('Import failed: ' + (data ? data.error || data.detail : 'unknown error'));
       }
     } else if (content) {
-      // Parse JSONL content and add entries one by one
       var lines = content.split('\n').filter(function(l) { return l.trim(); });
       var added = 0;
       for (var i = 0; i < lines.length; i++) {
@@ -487,8 +573,11 @@ function _generateConfigCode() {
   code += '    Args:\n';
   code += '        run_dir: Directory for JSONL I/O files\n';
   code += '        max_steps: Maximum training steps\n';
-  code += '        step_delay: Delay between steps (seconds)\n';
-  code += '        stop_event: threading.Event — check .is_set() each step\n';
+  code += '        step_delay: Delay between steps (seconds). For real training,\n';
+  code += '                    set to 0 — the dashboard tracks by step number.\n';
+  code += '        stop_event: threading.Event from stdlib. Check stop_event.is_set()\n';
+  code += '                    each step to allow graceful shutdown from the dashboard.\n';
+  code += '                    No extra imports needed beyond `import threading`.\n';
   code += '    """\n';
   code += '    metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")\n';
   code += '    commands_path = os.path.join(run_dir, "hotcb.commands.jsonl")\n';
@@ -530,20 +619,283 @@ function _generateConfigCode() {
 }
 
 /* ================================================================ */
+/* Autopilot Rules Editor                                            */
+/* ================================================================ */
+var _autopilotRules = [];
+var _ruleEditingId = null;  // rule_id being edited, or null
+var _rulesAutoRefresh = null;
+
+async function fetchAutopilotRules() {
+  var data = await api('GET', '/api/autopilot/rules');
+  if (!data || !data.rules) return;
+  _autopilotRules = data.rules;
+  if (_ruleEditingId !== null) return;  // Don't re-render during edit
+  renderAutopilotRules();
+}
+
+function _startRulesAutoRefresh() {
+  if (_rulesAutoRefresh) return;
+  _rulesAutoRefresh = setInterval(fetchAutopilotRules, 5000);
+}
+function _stopRulesAutoRefresh() {
+  if (_rulesAutoRefresh) { clearInterval(_rulesAutoRefresh); _rulesAutoRefresh = null; }
+}
+
+function renderAutopilotRules() {
+  var list = $('#autopilotRulesList');
+  if (!list) return;
+  list.innerHTML = '';
+  if (_autopilotRules.length === 0) {
+    list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px">No autopilot rules loaded. Click + Add Rule or Reload Defaults.</div>';
+    return;
+  }
+  _autopilotRules.forEach(function(rule) {
+    var div = document.createElement('div');
+    div.className = 'rule-entry';
+    div.dataset.ruleId = rule.rule_id;
+
+    var enabledClass = rule.enabled ? 'rule-enabled' : 'rule-disabled';
+    var enabledIcon = rule.enabled ? '\u2713' : '\u2717';
+    var enabledColor = rule.enabled ? 'var(--green)' : 'var(--red)';
+
+    var condColor = {plateau: 'var(--yellow)', divergence: 'var(--red)', overfitting: 'var(--orange)', custom: 'var(--purple)'}[rule.condition] || 'var(--text-muted)';
+    var confColor = {high: 'var(--green)', medium: 'var(--yellow)', low: 'var(--text-muted)'}[rule.confidence] || 'var(--text-muted)';
+
+    var actionSummary = '';
+    if (rule.action) {
+      var a = rule.action;
+      actionSummary = (a.module || '?') + '.' + (a.op || '?');
+      if (a.params) {
+        var ps = Object.keys(a.params).slice(0, 3).map(function(k) { return k + '=' + a.params[k]; }).join(', ');
+        if (ps) actionSummary += ' ' + ps;
+      }
+    }
+
+    var paramsSummary = '';
+    if (rule.params) {
+      paramsSummary = Object.keys(rule.params).map(function(k) { return k + '=' + rule.params[k]; }).join(', ');
+    }
+
+    div.innerHTML =
+      '<div class="rule-header">' +
+        '<button class="rule-toggle" style="border:none;background:none;cursor:pointer;color:' + enabledColor + ';font-size:13px;padding:0 4px" data-rid="' + rule.rule_id + '" title="Toggle enabled">' + enabledIcon + '</button>' +
+        '<span class="rule-id" style="font-weight:700;color:var(--text-primary)">' + rule.rule_id + '</span>' +
+        '<span style="color:' + condColor + ';font-size:9px;text-transform:uppercase;font-weight:600">' + rule.condition + '</span>' +
+        '<span style="color:var(--text-muted);font-size:9px">on <b>' + (rule.metric_name || '?') + '</b></span>' +
+        '<span style="color:' + confColor + ';font-size:9px">' + rule.confidence + '</span>' +
+        '<div style="flex:1"></div>' +
+        '<button class="edit-btn" data-rid="' + rule.rule_id + '" title="Edit">\u270E</button>' +
+        '<button class="del-btn" data-rid="' + rule.rule_id + '" title="Delete">&times;</button>' +
+      '</div>' +
+      (rule.description ? '<div class="rule-desc">' + rule.description + '</div>' : '') +
+      '<div class="rule-details">' +
+        (paramsSummary ? '<span style="color:var(--text-muted)">if: ' + paramsSummary + '</span>' : '') +
+        (actionSummary ? '<span style="color:var(--accent)">then: ' + actionSummary + '</span>' : '') +
+      '</div>';
+
+    // Toggle enabled
+    div.querySelector('.rule-toggle').addEventListener('click', async function(e) {
+      e.stopPropagation();
+      await api('POST', '/api/autopilot/rules/' + rule.rule_id + '/toggle');
+      fetchAutopilotRules();
+    });
+
+    // Delete
+    div.querySelector('.del-btn').addEventListener('click', async function(e) {
+      e.stopPropagation();
+      if (!confirm('Delete rule "' + rule.rule_id + '"?')) return;
+      await api('DELETE', '/api/autopilot/rules/' + rule.rule_id);
+      fetchAutopilotRules();
+    });
+
+    // Edit
+    div.querySelector('.edit-btn').addEventListener('click', function(e) {
+      e.stopPropagation();
+      _openRuleInlineEdit(div, rule);
+    });
+
+    list.appendChild(div);
+  });
+}
+
+function _openRuleInlineEdit(div, rule) {
+  _ruleEditingId = rule.rule_id;
+  div.className = 'rule-entry rule-editing';
+
+  var params = rule.params ? JSON.stringify(rule.params, null, 0) : '{}';
+  var action = rule.action ? JSON.stringify(rule.action, null, 0) : '{}';
+
+  div.innerHTML =
+    '<div class="rule-edit-form">' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<label style="color:var(--text-muted);font-size:9px;width:55px">Condition</label>' +
+        '<select class="re-condition" style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px">' +
+          '<option value="plateau"' + (rule.condition==='plateau'?' selected':'') + '>plateau</option>' +
+          '<option value="divergence"' + (rule.condition==='divergence'?' selected':'') + '>divergence</option>' +
+          '<option value="overfitting"' + (rule.condition==='overfitting'?' selected':'') + '>overfitting</option>' +
+          '<option value="custom"' + (rule.condition==='custom'?' selected':'') + '>custom</option>' +
+        '</select>' +
+      '</div>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<label style="color:var(--text-muted);font-size:9px;width:55px">Metric</label>' +
+        '<input class="re-metric" value="' + (rule.metric_name || '') + '" style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px;font-family:var(--font-mono)">' +
+      '</div>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<label style="color:var(--text-muted);font-size:9px;width:55px">Confidence</label>' +
+        '<select class="re-confidence" style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px">' +
+          '<option value="high"' + (rule.confidence==='high'?' selected':'') + '>high</option>' +
+          '<option value="medium"' + (rule.confidence==='medium'?' selected':'') + '>medium</option>' +
+          '<option value="low"' + (rule.confidence==='low'?' selected':'') + '>low</option>' +
+        '</select>' +
+      '</div>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<label style="color:var(--text-muted);font-size:9px;width:55px">Params</label>' +
+        '<input class="re-params" value=\'' + params.replace(/'/g, '&#39;') + '\' style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px;font-family:var(--font-mono)">' +
+      '</div>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<label style="color:var(--text-muted);font-size:9px;width:55px">Action</label>' +
+        '<input class="re-action" value=\'' + action.replace(/'/g, '&#39;') + '\' style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px;font-family:var(--font-mono)">' +
+      '</div>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<label style="color:var(--text-muted);font-size:9px;width:55px">Desc</label>' +
+        '<input class="re-desc" value="' + (rule.description || '').replace(/"/g, '&quot;') + '" style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--accent);border-radius:3px">' +
+      '</div>' +
+      '<div style="display:flex;gap:4px;justify-content:flex-end;margin-top:4px">' +
+        '<button class="btn btn-sm btn-accent re-save" style="font-size:9px;padding:2px 8px">\u2713 Save</button>' +
+        '<button class="btn btn-sm re-cancel" style="font-size:9px;padding:2px 8px">\u2715 Cancel</button>' +
+      '</div>' +
+    '</div>';
+
+  div.querySelector('.re-save').addEventListener('click', async function() {
+    var newCondition = div.querySelector('.re-condition').value;
+    var newMetric = div.querySelector('.re-metric').value.trim();
+    var newConfidence = div.querySelector('.re-confidence').value;
+    var newDesc = div.querySelector('.re-desc').value.trim();
+    var newParams = {};
+    var newAction = {};
+    try { newParams = JSON.parse(div.querySelector('.re-params').value || '{}'); } catch(e) {}
+    try { newAction = JSON.parse(div.querySelector('.re-action').value || '{}'); } catch(e) {}
+    _ruleEditingId = null;
+    await api('PUT', '/api/autopilot/rules/' + rule.rule_id, {
+      condition: newCondition,
+      metric_name: newMetric,
+      confidence: newConfidence,
+      params: newParams,
+      action: newAction,
+      description: newDesc,
+    });
+    fetchAutopilotRules();
+  });
+
+  div.querySelector('.re-cancel').addEventListener('click', function() {
+    _ruleEditingId = null;
+    fetchAutopilotRules();
+  });
+
+  // Enter to save, Escape to cancel (on any input)
+  div.querySelectorAll('input').forEach(function(inp) {
+    inp.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') div.querySelector('.re-save').click();
+      if (e.key === 'Escape') div.querySelector('.re-cancel').click();
+    });
+  });
+}
+
+function initAutopilotRulesEditor() {
+  var addBtn = $('#btnRuleAdd');
+  if (addBtn) addBtn.addEventListener('click', function() { openModal('modalRuleAdd'); });
+
+  var submitBtn = $('#btnRuleSubmit');
+  if (submitBtn) submitBtn.addEventListener('click', async function() {
+    var ruleId = $('#ruleId').value.trim();
+    if (!ruleId) { alert('Rule ID is required'); return; }
+    var condition = $('#ruleCondition').value;
+    var metric = $('#ruleMetric').value.trim() || 'train_loss';
+    var confidence = $('#ruleConfidence').value;
+    var params = {};
+    var action = {};
+    try { params = JSON.parse($('#ruleParams').value || '{}'); } catch(e) {}
+    try { action = JSON.parse($('#ruleAction').value || '{}'); } catch(e) {}
+    var desc = $('#ruleDescription').value.trim();
+
+    await api('POST', '/api/autopilot/rules', {
+      rule_id: ruleId,
+      condition: condition,
+      metric_name: metric,
+      confidence: confidence,
+      params: params,
+      action: action,
+      description: desc,
+    });
+    closeModal('modalRuleAdd');
+    // Clear form
+    $('#ruleId').value = '';
+    $('#ruleMetric').value = '';
+    $('#ruleParams').value = '';
+    $('#ruleAction').value = '';
+    $('#ruleDescription').value = '';
+    fetchAutopilotRules();
+  });
+
+  var reloadBtn = $('#btnRulesReload');
+  if (reloadBtn) reloadBtn.addEventListener('click', async function() {
+    await api('POST', '/api/autopilot/guidelines', {path: '__default__'});
+    fetchAutopilotRules();
+  });
+
+  fetchAutopilotRules();
+}
+
+/* ================================================================ */
 /* Compare Runs                                                      */
 /* ================================================================ */
 var _compareChart = null;
-var _compareRunColors = ['#00d4aa', '#3d9eff', '#ff9833', '#ff4d5e', '#9966ff', '#33dd77'];
+var _compareRunColorPalette = ['#00d4aa', '#3d9eff', '#ff9833', '#ff4d5e', '#9966ff', '#33dd77', '#ff66aa', '#66ddff', '#aadd33', '#dd66ff'];
+var _compareRunColorMap = {};  // runId -> color (stable mapping)
 var _selectedCompareRuns = new Set();
+var _compareAllData = {};  // runId -> records[]
+var _compareMetricNames = new Set();
+var _compareEnabledMetrics = {};  // name -> bool
+var _compareZoomed = false;
+var _compareRunMeta = {};  // runId -> run metadata
+
+function _getCompareRunColor(runId) {
+  if (!_compareRunColorMap[runId]) {
+    var usedColors = Object.values(_compareRunColorMap);
+    for (var i = 0; i < _compareRunColorPalette.length; i++) {
+      if (usedColors.indexOf(_compareRunColorPalette[i]) === -1) {
+        _compareRunColorMap[runId] = _compareRunColorPalette[i];
+        return _compareRunColorPalette[i];
+      }
+    }
+    // All colors used, cycle
+    _compareRunColorMap[runId] = _compareRunColorPalette[Object.keys(_compareRunColorMap).length % _compareRunColorPalette.length];
+  }
+  return _compareRunColorMap[runId];
+}
 
 function initCompare() {
     var btn = $('#btnCompareRefresh');
     if (btn) btn.addEventListener('click', fetchCompareRuns);
+
+    var zoomBtn = $('#btnCompareZoom');
+    if (zoomBtn) zoomBtn.addEventListener('click', function() {
+        _compareZoomed = !_compareZoomed;
+        document.body.classList.toggle('compare-zoom-mode', _compareZoomed);
+        zoomBtn.textContent = _compareZoomed ? '\u2716 Exit Zoom' : '\u26F6 Zoom';
+        if (_compareChart) _compareChart.resize();
+        _updateCompareOverlayInfo();
+    });
 }
 
 async function fetchCompareRuns() {
     var data = await api('GET', '/api/train/runs/history');
     if (!data || !data.runs) return;
+
+    // Store run metadata
+    data.runs.forEach(function(run) {
+        if (run.run_id) _compareRunMeta[run.run_id] = run;
+    });
 
     var list = $('#compareRunList');
     list.innerHTML = '';
@@ -555,7 +907,7 @@ async function fetchCompareRuns() {
 
     data.runs.forEach(function(run, idx) {
         var div = document.createElement('div');
-        var color = _compareRunColors[idx % _compareRunColors.length];
+        var color = _getCompareRunColor(run.run_id);
         var isSelected = _selectedCompareRuns.has(run.run_id);
         div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 8px;border:1px solid ' +
             (isSelected ? color : 'var(--border)') + ';border-radius:4px;cursor:pointer;font-size:10px;' +
@@ -590,63 +942,170 @@ async function fetchCompareRuns() {
     });
 }
 
-async function updateCompareChart() {
-    if (_selectedCompareRuns.size === 0) {
-        if (_compareChart) {
-            _compareChart.destroy();
-            _compareChart = null;
-        }
+function _updateCompareMetricToggles() {
+    var container = $('#compareMetricToggles');
+    if (!container) return;
+    container.innerHTML = '';
+    var names = Array.from(_compareMetricNames).sort();
+    if (names.length === 0) return;
+
+    // Build dropdown similar to main metrics dropdown
+    var wrap = document.createElement('div');
+    wrap.className = 'metric-dropdown-wrap';
+
+    var enabledCount = 0;
+    names.forEach(function(n) { if (_compareEnabledMetrics[n] !== false) enabledCount++; });
+
+    var toggleBtn = document.createElement('button');
+    toggleBtn.className = 'btn btn-sm metric-dropdown-btn';
+    toggleBtn.innerHTML = 'Metrics <span class="metric-count-badge">' + enabledCount + '/' + names.length + '</span> &#9662;';
+    toggleBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var p = wrap.querySelector('.metric-dropdown-panel');
+      if (p) p.classList.toggle('open');
+    });
+    wrap.appendChild(toggleBtn);
+
+    var panel = document.createElement('div');
+    panel.className = 'metric-dropdown-panel';
+
+    // Controls
+    var controls = document.createElement('div');
+    controls.className = 'metric-dropdown-controls';
+    var btnAll = document.createElement('button');
+    btnAll.className = 'btn btn-sm';
+    btnAll.textContent = 'All On';
+    btnAll.addEventListener('click', function(e) {
+      e.stopPropagation();
+      names.forEach(function(n) { _compareEnabledMetrics[n] = true; });
+      _rebuildCompareChart(); _updateCompareMetricToggles();
+    });
+    var btnNone = document.createElement('button');
+    btnNone.className = 'btn btn-sm';
+    btnNone.textContent = 'All Off';
+    btnNone.addEventListener('click', function(e) {
+      e.stopPropagation();
+      names.forEach(function(n) { _compareEnabledMetrics[n] = false; });
+      _rebuildCompareChart(); _updateCompareMetricToggles();
+    });
+    controls.appendChild(btnAll);
+    controls.appendChild(btnNone);
+    panel.appendChild(controls);
+
+    var list = document.createElement('div');
+    list.className = 'metric-dropdown-list';
+    names.forEach(function(name) {
+      var row = document.createElement('label');
+      row.className = 'metric-dropdown-item';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = _compareEnabledMetrics[name] !== false;
+      cb.addEventListener('change', function(e) {
+        e.stopPropagation();
+        _compareEnabledMetrics[name] = cb.checked;
+        var cnt = 0; names.forEach(function(n) { if (_compareEnabledMetrics[n] !== false) cnt++; });
+        var badge = wrap.querySelector('.metric-count-badge');
+        if (badge) badge.textContent = cnt + '/' + names.length;
+        _rebuildCompareChart();
+      });
+      var label = document.createElement('span');
+      label.className = 'metric-dropdown-name';
+      label.textContent = name;
+      row.appendChild(cb);
+      row.appendChild(label);
+      list.appendChild(row);
+    });
+    panel.appendChild(list);
+    wrap.appendChild(panel);
+    container.appendChild(wrap);
+
+    // Close on outside click
+    document.addEventListener('click', function(e) {
+      if (!wrap.contains(e.target)) {
+        var p = wrap.querySelector('.metric-dropdown-panel');
+        if (p) p.classList.remove('open');
+      }
+    });
+}
+
+function _updateCompareOverlayInfo() {
+    var overlay = $('#compareOverlayInfo');
+    if (!overlay) return;
+    if (!_compareZoomed || _selectedCompareRuns.size === 0) {
+        overlay.style.display = 'none';
+        return;
+    }
+    overlay.style.display = 'block';
+    var html = '';
+    var runIds = Array.from(_selectedCompareRuns);
+    runIds.forEach(function(runId, idx) {
+        var color = _getCompareRunColor(runId);
+        var meta = _compareRunMeta[runId] || {};
+        html += '<div style="color:' + color + ';margin-bottom:2px">' +
+            '<b>' + (meta.config_name || runId) + '</b>' +
+            (meta.max_steps ? ' · ' + meta.max_steps + ' steps' : '') +
+            '</div>';
+    });
+    overlay.innerHTML = html;
+}
+
+function _rebuildCompareChart() {
+    var canvas = document.getElementById('compareChart');
+    if (!canvas) return;
+    if (_compareChart) _compareChart.destroy();
+
+    var runIds = Array.from(_selectedCompareRuns);
+    if (runIds.length === 0) {
         $('#compareSummary').innerHTML = '<div style="color:var(--text-muted);padding:8px">Select runs from the left panel to compare.</div>';
         return;
     }
 
-    // Fetch metrics for each selected run
-    var allData = {};
-    var promises = [];
-    var runIds = Array.from(_selectedCompareRuns);
+    var datasets = [];
+    var enabledMetrics = [];
+    _compareMetricNames.forEach(function(name) {
+        if (_compareEnabledMetrics[name] !== false) enabledMetrics.push(name);
+    });
 
-    for (var i = 0; i < runIds.length; i++) {
-        (function(runId, idx) {
-            var p = api('GET', '/api/train/runs/' + runId + '/metrics').then(function(data) {
-                if (data && data.records) {
-                    allData[runId] = data.records;
+    // Mutation annotation plugin for compare chart
+    var compareAnnotations = [];
+
+    // Build metric-level dash patterns: first metric solid, rest dashed variants
+    var metricDashPatterns = [[], [6, 3], [2, 2], [8, 4, 2, 4], [4, 2], [10, 3]];
+
+    runIds.forEach(function(runId, runIdx) {
+        var records = _compareAllData[runId] || [];
+        var color = _getCompareRunColor(runId);
+
+        enabledMetrics.forEach(function(metricName, metricIdx) {
+            var points = [];
+            records.forEach(function(rec) {
+                var metrics = rec.metrics || {};
+                if (metricName in metrics) {
+                    points.push({x: rec.step, y: metrics[metricName]});
                 }
             });
-            promises.push(p);
-        })(runIds[i], i);
-    }
+            if (points.length === 0) return;
 
-    await Promise.all(promises);
+            // All metrics for the same run share the same color, differentiated by dash pattern
+            var dashPattern = metricDashPatterns[metricIdx % metricDashPatterns.length];
 
-    // Build chart datasets
-    var canvas = document.getElementById('compareChart');
-    if (!canvas) return;
-
-    if (_compareChart) _compareChart.destroy();
-
-    var datasets = [];
-    var metricName = 'train_loss'; // Default comparison metric
-
-    runIds.forEach(function(runId, idx) {
-        var records = allData[runId] || [];
-        var color = _compareRunColors[idx % _compareRunColors.length];
-        var points = [];
-        records.forEach(function(rec) {
-            var metrics = rec.metrics || {};
-            if (metricName in metrics) {
-                points.push({x: rec.step, y: metrics[metricName]});
-            }
-        });
-        datasets.push({
-            label: runId,
-            data: points,
-            borderColor: color,
-            backgroundColor: color + '22',
-            tension: 0.3,
-            pointRadius: 0,
-            borderWidth: 2,
+            datasets.push({
+                label: runId.substring(0, 8) + ' · ' + metricName,
+                data: points,
+                borderColor: color,
+                backgroundColor: 'transparent',
+                tension: 0.3,
+                pointRadius: 0,
+                borderWidth: 2,
+                borderDash: dashPattern,
+                _runId: runId,
+                _metricName: metricName,
+            });
         });
     });
+
+    // Also fetch applied data per run for mutation markers
+    _addCompareMutationMarkers(runIds, datasets, enabledMetrics);
 
     _compareChart = new Chart(canvas, {
         type: 'line',
@@ -654,42 +1113,253 @@ async function updateCompareChart() {
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            animation: false,
             scales: {
-                x: {type: 'linear', title: {display: true, text: 'Step', color: '#7a8fa3'}, grid: {color: '#1e2e44'}},
-                y: {title: {display: true, text: metricName, color: '#7a8fa3'}, grid: {color: '#1e2e44'}},
+                x: {type: 'linear', title: {display: true, text: 'Step', color: '#7a8fa3', font:{size:11}}, ticks: {color:'#7a8fa3'}, grid: {color: 'rgba(30,46,68,0.5)'}},
+                y: {title: {display: false}, ticks: {color:'#7a8fa3'}, grid: {color: 'rgba(30,46,68,0.3)'}},
             },
             plugins: {
-                legend: {labels: {color: '#d8e2ec', font: {family: 'JetBrains Mono', size: 10}}},
+                legend: {
+                    labels: {
+                        color: '#d8e2ec', font: {family: 'JetBrains Mono', size: 10},
+                        filter: function(item, chart) {
+                            // Hide mutation marker labels from legend
+                            if (item.text.indexOf('mutations') !== -1) return false;
+                            return true;
+                        },
+                        usePointStyle: true,
+                        pointStyle: 'line',
+                    },
+                    display: true,
+                    position: 'bottom',
+                },
+                tooltip: {
+                    backgroundColor:'#121c2b', borderColor:'#2a4060', borderWidth:1,
+                    titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:10},
+                    callbacks: {
+                        label: function(ctx) {
+                            var raw = ctx.raw;
+                            // Mutation marker tooltip
+                            if (raw && raw._mutation) {
+                                var m = raw._mutation;
+                                var parts = [raw._runId.substring(0, 12) + ' @ step ' + (m.step || raw.x)];
+                                parts.push((m.module || '?') + '.' + (m.op || '?'));
+                                if (m.params) {
+                                    var pStr = Object.keys(m.params).map(function(k) {
+                                        var v = m.params[k];
+                                        if (typeof v === 'number') v = v < 0.01 ? v.toExponential(1) : parseFloat(v.toPrecision(3));
+                                        return k + '=' + v;
+                                    }).join(', ');
+                                    parts.push(pStr);
+                                }
+                                var src = m.source || 'interactive';
+                                parts.push('source: ' + src);
+                                if (raw._metric) parts.push('on: ' + raw._metric);
+                                return parts;
+                            }
+                            // Regular line tooltip — show run color swatch info
+                            var ds = ctx.dataset;
+                            var val = typeof ctx.parsed.y === 'number' ? ctx.parsed.y.toPrecision(5) : ctx.parsed.y;
+                            return ds.label + ': ' + val;
+                        }
+                    }
+                },
             },
+            elements: { point: {radius:0, hoverRadius:3}, line: {tension:0.3} },
         },
     });
 
-    // Build summary table
+    _updateCompareOverlayInfo();
+    _updateCompareSummary(runIds, enabledMetrics);
+}
+
+function _addCompareMutationMarkers(runIds, datasets, enabledMetrics) {
+    // For each run, add mutation markers on the first enabled metric that has data
+    runIds.forEach(function(runId, runIdx) {
+        var color = _getCompareRunColor(runId);
+        var appliedData = _compareAllData['_applied_' + runId] || [];
+        if (appliedData.length === 0) return;
+        var metricRecords = _compareAllData[runId] || [];
+        var markerPoints = [];
+
+        appliedData.forEach(function(rec) {
+            if (rec.step === undefined) return;
+            // Find the closest metric record at or near this step
+            var bestIdx = -1;
+            var bestDist = Infinity;
+            for (var i = 0; i < metricRecords.length; i++) {
+                var d = Math.abs(metricRecords[i].step - rec.step);
+                if (d < bestDist) { bestDist = d; bestIdx = i; }
+                if (metricRecords[i].step >= rec.step) break;
+            }
+            if (bestIdx < 0) return;
+            var m = metricRecords[bestIdx].metrics || {};
+            // Use the first enabled metric that has a value at this step
+            var y = undefined;
+            var usedMetric = null;
+            for (var mi = 0; mi < enabledMetrics.length; mi++) {
+                if (m[enabledMetrics[mi]] !== undefined) {
+                    y = m[enabledMetrics[mi]];
+                    usedMetric = enabledMetrics[mi];
+                    break;
+                }
+            }
+            if (y !== undefined) {
+                markerPoints.push({
+                    x: metricRecords[bestIdx].step, y: y,
+                    _mutation: rec,
+                    _runId: runId,
+                    _metric: usedMetric,
+                });
+            }
+        });
+
+        if (markerPoints.length > 0) {
+            datasets.push({
+                label: runId.substring(0, 8) + ' mutations',
+                data: markerPoints,
+                type: 'scatter',
+                borderColor: color,
+                backgroundColor: color + '44',
+                pointRadius: 7,
+                pointStyle: 'triangle',
+                pointHoverRadius: 10,
+                showLine: false,
+                _isMutationMarker: true,
+            });
+        }
+    });
+}
+
+async function _updateCompareSummary(runIds, enabledMetrics) {
     var summary = $('#compareSummary');
+    var metricsToShow = enabledMetrics.slice(0, 4);
     var html = '<table style="width:100%;border-collapse:collapse;">';
-    html += '<tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:3px 6px;color:var(--text-muted)">Run</th>';
+    html += '<tr style="border-bottom:1px solid var(--border)">';
+    html += '<th style="text-align:left;padding:3px 6px;color:var(--text-muted)">Run</th>';
     html += '<th style="text-align:left;padding:3px 6px;color:var(--text-muted)">Config</th>';
     html += '<th style="text-align:right;padding:3px 6px;color:var(--text-muted)">Steps</th>';
-    html += '<th style="text-align:right;padding:3px 6px;color:var(--text-muted)">Final Loss</th></tr>';
+    metricsToShow.forEach(function(m) {
+        html += '<th style="text-align:right;padding:3px 6px;color:var(--text-muted)">' + m + '</th>';
+    });
+    html += '</tr>';
 
-    // Fetch run metadata for the summary
-    var histData = await api('GET', '/api/train/runs/history');
-    if (histData && histData.runs) {
-        histData.runs.forEach(function(run, idx) {
-            if (!_selectedCompareRuns.has(run.run_id)) return;
-            var color = _compareRunColors[runIds.indexOf(run.run_id) % _compareRunColors.length];
-            var finalLoss = run.final_metrics && run.final_metrics.train_loss
-                ? run.final_metrics.train_loss.toFixed(6) : '--';
-            html += '<tr style="border-bottom:1px solid rgba(30,46,68,0.3)">';
-            html += '<td style="padding:3px 6px"><span style="color:' + color + '">' + (run.run_id || '?') + '</span></td>';
-            html += '<td style="padding:3px 6px;color:var(--text-secondary)">' + (run.config_name || run.config_id || '?') + '</td>';
-            html += '<td style="padding:3px 6px;text-align:right">' + (run.max_steps || '?') + '</td>';
-            html += '<td style="padding:3px 6px;text-align:right;font-weight:600">' + finalLoss + '</td>';
-            html += '</tr>';
+    runIds.forEach(function(runId, idx) {
+        var color = _getCompareRunColor(runId);
+        var meta = _compareRunMeta[runId] || {};
+        var records = _compareAllData[runId] || [];
+        var applied = _compareAllData['_applied_' + runId] || [];
+        var lastRec = records.length > 0 ? records[records.length - 1] : {};
+        var lastMetrics = lastRec.metrics || {};
+
+        html += '<tr style="border-bottom:1px solid rgba(30,46,68,0.3)">';
+        html += '<td style="padding:3px 6px"><span style="color:' + color + '">' + (runId || '?') + '</span></td>';
+        html += '<td style="padding:3px 6px;color:var(--text-secondary)">' + (meta.config_name || meta.config_id || '?') + '</td>';
+        html += '<td style="padding:3px 6px;text-align:right">' + (meta.max_steps || records.length || '?') + '</td>';
+        metricsToShow.forEach(function(m) {
+            var v = lastMetrics[m];
+            var display = v !== undefined ? (typeof v === 'number' ? v.toFixed(6) : v) : '--';
+            html += '<td style="padding:3px 6px;text-align:right;font-weight:600">' + display + '</td>';
         });
-    }
+        html += '</tr>';
+
+        // Show mutation details for this run
+        if (applied.length > 0) {
+            html += '<tr><td colspan="' + (3 + metricsToShow.length) + '" style="padding:2px 6px 6px 20px;font-size:9px;">';
+            html += '<span style="color:var(--orange);font-weight:700">' + applied.length + ' mutations:</span> ';
+            applied.slice(0, 8).forEach(function(a, ai) {
+                var src = a.source || 'interactive';
+                var srcColor = src === 'recipe' ? 'var(--yellow)' : src === 'autopilot' ? 'var(--cyan)' : 'var(--text-muted)';
+                var paramStr = '';
+                if (a.params) {
+                    paramStr = Object.keys(a.params).slice(0, 2).map(function(k) {
+                        var v = a.params[k];
+                        if (typeof v === 'number') v = v < 0.01 ? v.toExponential(1) : parseFloat(v.toPrecision(3));
+                        return k + '\u2192' + v;
+                    }).join(', ');
+                }
+                if (ai > 0) html += ' ';
+                html += '<span style="color:var(--text-secondary)">[s' + (a.step||'?') + ' ' + (a.module||'?') + '.' + (a.op||'?');
+                if (paramStr) html += ' ' + paramStr;
+                html += ' <span style="color:' + srcColor + '">' + src + '</span>]</span>';
+            });
+            if (applied.length > 8) html += ' <span style="color:var(--text-muted)">+' + (applied.length - 8) + ' more</span>';
+            html += '</td></tr>';
+        }
+    });
     html += '</table>';
     summary.innerHTML = html;
+}
+
+async function updateCompareChart() {
+    if (_selectedCompareRuns.size === 0) {
+        if (_compareChart) {
+            _compareChart.destroy();
+            _compareChart = null;
+        }
+        _compareMetricNames = new Set();
+        _updateCompareMetricToggles();
+        $('#compareSummary').innerHTML = '<div style="color:var(--text-muted);padding:8px">Select runs from the left panel to compare.</div>';
+        return;
+    }
+
+    // Fetch metrics and applied data for each selected run
+    var promises = [];
+    var runIds = Array.from(_selectedCompareRuns);
+
+    for (var i = 0; i < runIds.length; i++) {
+        (function(runId) {
+            // Fetch metrics
+            var p1 = api('GET', '/api/train/runs/' + runId + '/metrics').then(function(data) {
+                if (data && data.records) {
+                    _compareAllData[runId] = data.records;
+                    // Discover metric names
+                    data.records.forEach(function(rec) {
+                        var metrics = rec.metrics || {};
+                        Object.keys(metrics).forEach(function(name) {
+                            if (typeof metrics[name] === 'number') {
+                                _compareMetricNames.add(name);
+                                if (!(name in _compareEnabledMetrics)) {
+                                    // Default: enable all discovered metrics
+                                    _compareEnabledMetrics[name] = true;
+                                }
+                            }
+                        });
+                    });
+                }
+            });
+            // Fetch applied data for mutation markers
+            var p2 = api('GET', '/api/train/runs/' + runId + '/applied').then(function(data) {
+                if (data && data.records) {
+                    _compareAllData['_applied_' + runId] = data.records;
+                }
+            }).catch(function() {
+                _compareAllData['_applied_' + runId] = [];
+            });
+            promises.push(p1, p2);
+        })(runIds[i]);
+    }
+
+    await Promise.all(promises);
+
+    // Ensure at least one metric is enabled
+    var anyEnabled = false;
+    _compareMetricNames.forEach(function(name) {
+        if (_compareEnabledMetrics[name]) anyEnabled = true;
+    });
+    if (!anyEnabled) {
+        // Enable train_loss by default, or first metric
+        if (_compareMetricNames.has('train_loss')) {
+            _compareEnabledMetrics['train_loss'] = true;
+        } else {
+            var first = null;
+            _compareMetricNames.forEach(function(n) { if (!first) first = n; });
+            if (first) _compareEnabledMetrics[first] = true;
+        }
+    }
+
+    _updateCompareMetricToggles();
+    _rebuildCompareChart();
 }
 
 /* ================================================================ */

@@ -12,7 +12,7 @@ async function initialLoad() {
 
   // Metric history
   var hist = await api('GET', '/api/metrics/history?last_n=2000');
-  if (hist && hist.records) {
+  if (hist && hist.records && hist.records.length > 0) {
     hist.records.forEach(function(rec) {
       var step = rec.step || 0;
       var metrics = rec.metrics || {};
@@ -25,9 +25,22 @@ async function initialLoad() {
         S.metricsData[name].push({step: step, value: value});
       });
     });
+    // Restore pinned metrics now that we have data
+    if (S._pendingPinnedMetrics) {
+      S._pendingPinnedMetrics.forEach(function(name) {
+        if (S.metricNames.has(name)) {
+          S.pinnedMetrics.add(name);
+          createMetricCard(name);
+        }
+      });
+      delete S._pendingPinnedMetrics;
+    }
     updateMetricToggles();
     updateChart();
     computeHealth();
+  } else {
+    // No data — clear any pending pinned metrics
+    delete S._pendingPinnedMetrics;
   }
 
   // Applied history
@@ -68,6 +81,7 @@ async function initialLoad() {
   initControls();
   $('#btnTour').addEventListener('click', startTour);
   initRecipeEditor();
+  initAutopilotRulesEditor();
   initChat();
   initNotifications();
   initCallHelp();
@@ -93,10 +107,9 @@ async function initialLoad() {
         sel.dispatchEvent(new Event('change'));
       }
     }
+    // Defer pinned metrics restoration until data is loaded
     if (savedState.pinnedMetrics && savedState.pinnedMetrics.length) {
-      savedState.pinnedMetrics.forEach(function(name) {
-        S.pinnedMetrics.add(name);
-      });
+      S._pendingPinnedMetrics = savedState.pinnedMetrics;
     }
     if (savedState.knobs) {
       if (savedState.knobs.lr) {

@@ -173,26 +173,13 @@ def run_demo(
     w = sys.stderr.write
     w(f"\n  hotcb demo\n")
     w(f"  Run dir:   {run_dir}\n")
-    w(f"  Dashboard: http://localhost:{port}\n")
-    w(f"  Training:  {max_steps} steps @ {step_delay}s/step\n\n")
+    w(f"  Dashboard: http://localhost:{port}\n\n")
     w("  Open the dashboard URL in your browser.\n")
-    w("  Use the knobs to change lr/wd, see live charts update.\n")
-    w("  Try the What-If button for forecasts.\n")
-    w("  Press Ctrl+C to stop.\n\n")
+    w("  Use the Training panel to start a run (Simple, Multi-Objective, or Finetune).\n")
+    w("  Then use knobs, recipes, and autopilot to control training live.\n")
+    w("  Press Ctrl+C to stop the server.\n\n")
 
-    # Start training in background thread
-    train_thread = threading.Thread(
-        target=_demo_training,
-        kwargs={
-            "run_dir": run_dir,
-            "max_steps": max_steps,
-            "step_delay": step_delay,
-        },
-        daemon=True,
-    )
-    train_thread.start()
-
-    # Run dashboard server (blocking)
+    # Run dashboard server (blocking) — training is started from the UI
     from .server.app import run_server
 
     run_server(run_dir=run_dir, host=host, port=port, poll_interval=0.3)

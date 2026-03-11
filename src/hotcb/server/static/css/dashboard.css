@@ -372,6 +372,79 @@ body.mode-education .knob-explain { display: block; }
   border: none; background: none;
 }
 .recipe-entry .del-btn:hover { color: var(--red); background: rgba(255,77,94,0.1); }
+.recipe-entry .edit-btn {
+  width: 18px; height: 18px; border-radius: 3px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; color: var(--text-muted); font-size: 11px;
+  border: none; background: none;
+}
+.recipe-entry .edit-btn:hover { color: var(--accent); background: var(--accent-glow); }
+.recipe-entry.recipe-editing {
+  grid-template-columns: 1fr;
+  cursor: default; background: var(--bg-secondary);
+  border: 1px solid var(--border-bright); border-radius: var(--radius);
+  padding: 8px;
+}
+.recipe-edit-form {
+  display: grid; grid-template-columns: 70px 70px 90px 1fr;
+  gap: 6px; align-items: center; margin-bottom: 6px;
+}
+.recipe-edit-form input, .recipe-edit-form select {
+  background: var(--bg-input); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-family: var(--font-mono); font-size: 10px; padding: 3px 6px;
+}
+.recipe-edit-form input:focus, .recipe-edit-form select:focus {
+  outline: none; border-color: var(--accent);
+}
+.recipe-edit-actions {
+  display: flex; gap: 4px; justify-content: flex-end;
+}
+
+/* ================================================================== */
+/* Autopilot rules editor                                              */
+/* ================================================================== */
+.rule-entry {
+  padding: 8px 10px; margin-bottom: 4px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 10px; font-family: var(--font-mono);
+  transition: border-color 0.15s;
+}
+.rule-entry:hover { border-color: var(--border-bright); background: var(--bg-hover); }
+.rule-header {
+  display: flex; align-items: center; gap: 6px; flex-wrap: nowrap;
+}
+.rule-desc {
+  font-size: 9px; color: var(--text-secondary); margin: 3px 0 0 22px;
+  line-height: 1.3; font-family: var(--font-sans);
+}
+.rule-details {
+  display: flex; gap: 12px; margin-top: 3px; padding-left: 22px;
+  font-size: 9px;
+}
+.rule-entry .edit-btn, .rule-entry .del-btn {
+  width: 18px; height: 18px; border-radius: 3px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; color: var(--text-muted); font-size: 11px;
+  border: none; background: none; flex-shrink: 0;
+}
+.rule-entry .edit-btn:hover { color: var(--accent); background: var(--accent-glow); }
+.rule-entry .del-btn:hover { color: var(--red); background: rgba(255,77,94,0.1); }
+.rule-entry.rule-editing {
+  border-color: var(--accent); background: var(--bg-secondary);
+  padding: 10px;
+}
+.rule-edit-form {
+  display: flex; flex-direction: column; gap: 5px;
+}
+.rule-edit-form input, .rule-edit-form select {
+  background: var(--bg-input); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-family: var(--font-mono); font-size: 10px; padding: 3px 6px;
+}
+.rule-edit-form input:focus, .rule-edit-form select:focus {
+  outline: none; border-color: var(--accent);
+}
 
 /* ================================================================== */
 /* Chat (vibe-coder)                                                   */
@@ -605,5 +678,25 @@ body.metric-focus-mode .metric-card { max-width: 100%; }
 /* Right-col growable panel constraints                                */
 /* ================================================================== */
 #autopilotPanel { max-height: 200px; overflow-y: auto; }
-#trainPanel { max-height: 200px; overflow-y: auto; }
+#trainPanel { max-height: 240px; overflow-y: auto; }
 #chatMessages { max-height: 150px; }
+#healthMetrics { max-height: 160px; overflow-y: auto; }
+#notifList { max-height: 160px; overflow-y: auto; }
+
+/* Right-col cards: expand to content, scroll the column */
+.right-col > .card {
+  flex-shrink: 0;
+}
+.right-col > .card .card-body {
+  overflow-y: auto;
+}
+
+/* Compare zoom mode */
+body.compare-zoom-mode .main { grid-template-columns: 1fr; }
+body.compare-zoom-mode .right-col { display: none; }
+body.compare-zoom-mode .bottom-panel { display: none; }
+body.compare-zoom-mode #metricCards { display: none; }
+body.compare-zoom-mode #compareSidebar { display: none; }
+body.compare-zoom-mode #compareOverlayInfo { display: block !important; }
+body.compare-zoom-mode .chart-area { min-height: calc(100vh - 88px); }
+body.compare-zoom-mode .tab-content[data-tab="compare"] { flex: 1; }

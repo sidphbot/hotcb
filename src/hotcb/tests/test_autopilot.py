@@ -324,6 +324,37 @@ class TestAutopilotRESTEndpoints:
         r = client.delete("/api/autopilot/rules/nope")
         assert r.status_code == 404
 
+    def test_update_rule(self, client):
+        client.post("/api/autopilot/rules", json={
+            "rule_id": "upd1", "condition": "plateau", "metric_name": "loss",
+            "confidence": "medium", "description": "original",
+        })
+        r = client.put("/api/autopilot/rules/upd1", json={
+            "confidence": "high", "description": "updated",
+        })
+        assert r.status_code == 200
+        assert r.json()["rule"]["confidence"] == "high"
+        assert r.json()["rule"]["description"] == "updated"
+
+    def test_update_nonexistent_rule(self, client):
+        r = client.put("/api/autopilot/rules/nope", json={"confidence": "low"})
+        assert r.status_code == 404
+
+    def test_toggle_rule(self, client):
+        client.post("/api/autopilot/rules", json={
+            "rule_id": "tog1", "condition": "plateau", "metric_name": "loss",
+            "enabled": True,
+        })
+        r = client.post("/api/autopilot/rules/tog1/toggle")
+        assert r.status_code == 200
+        assert r.json()["enabled"] is False
+        r2 = client.post("/api/autopilot/rules/tog1/toggle")
+        assert r2.json()["enabled"] is True
+
+    def test_toggle_nonexistent_rule(self, client):
+        r = client.post("/api/autopilot/rules/nope/toggle")
+        assert r.status_code == 404
+
     def test_history(self, client):
         r = client.get("/api/autopilot/history")
         assert r.status_code == 200

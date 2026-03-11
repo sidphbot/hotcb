@@ -320,6 +320,19 @@ router = APIRouter(prefix="/api/recipe", tags=["recipe"])
 
 def _get_editor(request: Request) -> RecipeEditor:
     editor = getattr(request.app.state, "recipe_editor", None)
+    run_dir = getattr(request.app.state, "run_dir", None)
+    recipe_path = os.path.join(run_dir, "hotcb.recipe.jsonl") if run_dir else None
+
+    if editor is None and recipe_path:
+        # Auto-create editor if recipe file exists (or create empty one)
+        if not os.path.exists(recipe_path):
+            open(recipe_path, "w").close()
+        editor = RecipeEditor(recipe_path)
+        request.app.state.recipe_editor = editor
+    elif editor is not None:
+        # Reload from disk so we pick up changes from schedule/save-as-recipe
+        editor.load()
+
     if editor is None:
         raise HTTPException(status_code=400, detail="No recipe loaded")
     return editor
@@ -342,6 +355,7 @@ async def load_recipe(body: LoadRequest, request: Request):
 async def add_entry(body: AddEntryRequest, request: Request):
     editor = _get_editor(request)
     entry = editor.add(body.entry, body.position)
+    editor.save()
     return {"status": "added", "entry": _entry_to_dict(entry)}
 
 
@@ -352,6 +366,7 @@ async def remove_entry(index: int, request: Request):
         removed = editor.remove(index)
     except IndexError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    editor.save()
     return {"status": "removed", "entry": _entry_to_dict(removed)}
 
 
@@ -362,6 +377,7 @@ async def update_entry(index: int, body: UpdateEntryRequest, request: Request):
         updated = editor.update(index, body.changes)
     except IndexError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    editor.save()
     return {"status": "updated", "entry": _entry_to_dict(updated)}
 
 
@@ -372,6 +388,7 @@ async def move_entry(body: MoveRequest, request: Request):
         editor.move(body.from_index, body.to_index)
     except IndexError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    editor.save()
     return {"status": "moved", "from": body.from_index, "to": body.to_index}
 
 
@@ -379,6 +396,7 @@ async def move_entry(body: MoveRequest, request: Request):
 async def shift_steps(body: ShiftRequest, request: Request):
     editor = _get_editor(request)
     count = editor.shift_steps(body.offset, body.from_index, body.to_index)
+    editor.save()
     return {"status": "shifted", "count": count, "offset": body.offset}
 
 

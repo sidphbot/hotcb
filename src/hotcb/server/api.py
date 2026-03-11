@@ -222,6 +222,10 @@ async def schedule(body: ScheduleRequest, request: Request):
     run_dir: str = request.app.state.run_dir
     recipe_path = os.path.join(run_dir, "hotcb.recipe.jsonl")
     append_jsonl(recipe_path, cmd)
+    # Ensure recipe editor picks up the new entry on next fetch
+    editor = getattr(request.app.state, "recipe_editor", None)
+    if editor is not None:
+        editor.load()
     return {"status": "scheduled", "command": cmd}
 
 
@@ -369,6 +373,10 @@ async def save_applied_as_recipe(request: Request):
     with open(recipe_path, "w", encoding="utf-8") as f:
         for entry in entries:
             f.write(json.dumps(entry) + "\n")
+
+    # Reload the recipe editor so it picks up the new file
+    from .recipe_editor import RecipeEditor
+    request.app.state.recipe_editor = RecipeEditor(recipe_path)
 
     return {
         "status": "saved",

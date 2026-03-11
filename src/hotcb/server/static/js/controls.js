@@ -26,6 +26,24 @@ function _clearTrainingState() {
   S.chatHistory = [];
   S.alerts = [];
   _healthEma = null;
+  // Clear focus/zoom state
+  if (S.focusMetric) {
+    S.focusMetric = null;
+    document.body.classList.remove('metric-focus-mode');
+  }
+  // Clear pinned metric cards
+  S.pinnedMetrics = new Set();
+  if (S.metricCardCharts) {
+    Object.keys(S.metricCardCharts).forEach(function(k) {
+      if (S.metricCardCharts[k]) S.metricCardCharts[k].destroy();
+    });
+  }
+  S.metricCardCharts = {};
+  var mcContainer = $('#metricCards');
+  if (mcContainer) mcContainer.innerHTML = '';
+  // Clear forecast cache
+  _forecastCache = {};
+  _highlightedMutationStep = null;
   clearTimelineDedup();
   updateMetricToggles();
   updateChart();
@@ -179,6 +197,17 @@ function initControls() {
     if (defs.max_steps) $('#trainMaxSteps').value = defs.max_steps;
     if (defs.step_delay) $('#trainStepDelay').value = defs.step_delay;
     _updateConfigControls(id);
+    // Check for recipe and update toggle status
+    var recipeStatus = document.getElementById('trainRecipeStatus');
+    if (recipeStatus) {
+      api('GET', '/api/recipe/').then(function(data) {
+        if (data && data.entries && data.entries.length > 0) {
+          recipeStatus.textContent = data.entries.length + ' entries available';
+        } else {
+          recipeStatus.textContent = 'no recipe loaded';
+        }
+      });
+    }
   });
 
   // Initial config controls state
@@ -200,36 +229,30 @@ function initControls() {
     await api('POST', '/api/train/reset', {});
     _clearTrainingState();
 
-    var res = await api('POST', '/api/train/start', {
+    // If "load recipe" is checked, load the recipe before starting
+    var loadRecipe = document.getElementById('trainLoadRecipe');
+    if (loadRecipe && loadRecipe.checked) {
+      var recipeStatus = document.getElementById('trainRecipeStatus');
+      if (recipeStatus) recipeStatus.textContent = 'loading recipe...';
+      var recipeData = await api('GET', '/api/recipe/');
+      if (recipeData && recipeData.entries && recipeData.entries.length > 0) {
+        if (recipeStatus) recipeStatus.textContent = recipeData.entries.length + ' entries loaded';
+      } else {
+        if (recipeStatus) recipeStatus.textContent = 'no recipe found';
+      }
+    }
+
+    var seedInput = document.getElementById('trainSeed');
+    var seedVal = seedInput && seedInput.value ? parseInt(seedInput.value) : null;
+    var startBody = {
       config_id: configId,
       max_steps: maxSteps,
       step_delay: stepDelay,
-    });
+    };
+    if (seedVal !== null && !isNaN(seedVal)) startBody.seed = seedVal;
+    var res = await api('POST', '/api/train/start', startBody);
     if (res && !res.error) {
       pollTrainStatus();
-      // Auto-lock freeze dropdown if replay mode is selected
-      var freezeSel = $('#freezeSelect');
-      if (freezeSel && freezeSel.value !== 'off') {
-        freezeSel.disabled = true;
-        freezeSel.style.opacity = '0.5';
-        var unlockBtn = document.getElementById('btnFreezeUnlock');
-        if (!unlockBtn) {
-          unlockBtn = document.createElement('button');
-          unlockBtn.id = 'btnFreezeUnlock';
-          unlockBtn.className = 'btn btn-sm';
-          unlockBtn.textContent = 'Unlock';
-          unlockBtn.style.cssText = 'font-size:8px;color:var(--red);margin-left:4px;';
-          unlockBtn.addEventListener('click', async function() {
-            if (!confirm('Are you sure you want to unlock freeze? This overrides safety controls.')) return;
-            await api('POST', '/api/freeze', {mode: 'off'});
-            freezeSel.disabled = false;
-            freezeSel.style.opacity = '1';
-            freezeSel.value = 'off';
-            unlockBtn.remove();
-          });
-          freezeSel.parentNode.insertBefore(unlockBtn, freezeSel.nextSibling);
-        }
-      }
     }
   });
   $('#btnTrainStop').addEventListener('click', async function() {
@@ -443,6 +466,12 @@ async function pollTrainStatus() {
       var info = 'Running since ' + res.started_at;
       if (res.config && res.config.max_steps) {
         info += ' (' + res.config.max_steps + ' steps)';
+      }
+      if (res.config && res.config.seed !== undefined) {
+        info += ' seed=' + res.config.seed;
+        // Backfill seed input so user can see/copy it
+        var seedInput = document.getElementById('trainSeed');
+        if (seedInput && !seedInput.value) seedInput.value = res.config.seed;
       }
       el.textContent = info;
       el.style.color = 'var(--green, #4ade80)';

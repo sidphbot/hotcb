@@ -41,6 +41,7 @@ function saveUIState() {
     pinnedMetrics: [],
     knobs: {},
     metricVisibility: {},
+    focusMetric: null,
   };
   // Active tab
   var activeTab = document.querySelector('.tabs .tab.active[data-tab]');
@@ -48,8 +49,11 @@ function saveUIState() {
   // Train config
   var sel = document.getElementById('trainConfig');
   if (sel) state.trainConfig = sel.value;
-  // Pinned metrics
-  state.pinnedMetrics = Array.from(S.pinnedMetrics || []);
+  // Pinned metrics — only save if there's data (avoids persisting stale pins)
+  if (S.metricNames && S.metricNames.size > 0) {
+    state.pinnedMetrics = Array.from(S.pinnedMetrics || []);
+  }
+  // Don't persist focusMetric — it should reset with the session
   // Knobs
   var lr = document.getElementById('knobLr');
   var wd = document.getElementById('knobWd');
