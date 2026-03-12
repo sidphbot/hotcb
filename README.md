@@ -1,4 +1,6 @@
 # hotcb
+<img width="1600" height="896" alt="hotcb_logo" src="https://github.com/user-attachments/assets/8f9703f7-be4d-4076-8bab-fd094d1c8f6a" />
+
 
 **Live Training Control Plane for PyTorch**
 
