@@ -14,7 +14,7 @@ Now tune hyperparameters in 2 not 2000 runs !!
 
 https://github.com/user-attachments/assets/2de80dc6-da66-4344-a2fc-8e726d2d9221
 
-
+In the video you can see a model distillation run being balanced for classification feature tokens and spatial maps in terms of both direction(cos) and structure(mse+grad). The mutations applied here are taken by ai autonomously via hot b AI-Autopilot mode show thier impact (features vs spatial map) quantitatively(impact analysis) and qualitatively(curve steps).
 
 ---
 
@@ -38,17 +38,22 @@ Plus:
 - **Freeze modes**: production lock, deterministic replay, replay-with-adjustments
 
 ---
-
+Live Mutation Scheduling Recipe editor:
 ![recipe_and_mutations_with_scheduling](https://github.com/sidphbot/hotcb/blob/master/screens/recipe_and_mutations_with_scheduling.png)
 
+Mutation tracking:
 ![mutations](https://github.com/sidphbot/hotcb/blob/master/screens/mutations.png)
 
+Mutation impact analysis:
 ![mutation_exanpded_impact_log](https://github.com/sidphbot/hotcb/blob/master/screens/mutation_exanpded_impact_log.png)
 
+Rule based Autopilot (AI mode in video above)
 ![automated-ai-free-training-intervention](https://github.com/sidphbot/hotcb/blob/master/screens/automated-ai-free-training-intervention.png)
 
+Mutation Recipe impact comparison:
 ![comparison_with_mutation_changes](https://github.com/sidphbot/hotcb/blob/master/screens/comparison_with_mutation_changes.png)
 
+Dynamic metric space manifold update:
 ![dynamic_manifold_vis](https://github.com/sidphbot/hotcb/blob/master/screens/dynamic_manifold_vis.png)
 
 ---
