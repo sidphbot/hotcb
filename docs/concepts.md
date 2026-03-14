@@ -108,7 +108,7 @@ hotcb never kills training on a module error. When an op fails:
 2. If `auto_disable_on_error` is enabled, the offending handle is disabled.
 3. Training continues uninterrupted.
 
-This applies uniformly to all modules. A bad callback, an invalid LR value, or a missing loss_state reference will be logged and isolated -- not propagated.
+This applies uniformly to all modules. A bad callback, an invalid LR value, or a missing mutable_state reference will be logged and isolated -- not propagated.
 
 ## Safe-Point Updates Only
 
@@ -164,16 +164,21 @@ Configuration:
 
 ## Metrics Collection
 
-`MetricsCollector` writes training metrics to `hotcb.metrics.jsonl`:
+`MetricsCollector` writes training metrics to `hotcb.metrics.jsonl`. It is an internal component — you create it and pass it to `HotKernel`, which calls `collect(env)` automatically each step:
 
 ```python
+from hotcb.kernel import HotKernel
 from hotcb.metrics import MetricsCollector
 
-mc = MetricsCollector("runs/exp1/hotcb.metrics.jsonl")
-mc.log(step=100, metrics={"loss": 0.45, "lr": 0.001, "val_loss": 0.52})
+mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
+kernel = HotKernel(run_dir=run_dir, metrics_collector=mc)
+
+# In your training loop, put metrics in env["metrics"]:
+env = {"step": step, "metrics": {"loss": 0.45, "lr": 0.001}, ...}
+kernel.apply(env, events=["train_step_end"])  # collector called internally
 ```
 
-The dashboard tails this file for live charts. The autopilot reads it for trend analysis.
+Framework adapters (Lightning, HF) build the env automatically from logged/callback metrics. The dashboard tails this file for live charts. The autopilot reads it for trend analysis.
 
 ## Programmatic Launch API
 

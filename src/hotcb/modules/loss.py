@@ -27,13 +27,13 @@ class HotLossController:
         self._actuator = None
 
     def set_actuator(self, actuator) -> None:
-        """Register a LossStateActuator for pre-apply validation."""
+        """Register a MutableStateActuator for pre-apply validation."""
         self._actuator = actuator
 
-    def _resolve_loss_state(self, env: dict):
-        if "loss_state" in env:
-            return env.get("loss_state")
-        resolver = env.get("resolve_loss_state")
+    def _resolve_mutable_state(self, env: dict):
+        if "mutable_state" in env:
+            return env.get("mutable_state")
+        resolver = env.get("resolve_mutable_state")
         if callable(resolver):
             try:
                 return resolver()
@@ -60,9 +60,9 @@ class HotLossController:
                 return ModuleResult(decision="skipped_noop", notes="handle_disabled")
             params = op.params or {}
             handle.last_params.update(params)
-            loss_state = self._resolve_loss_state(env)
-            if loss_state is None:
-                return ModuleResult(decision="failed", error="missing_loss_state")
+            mutable_state = self._resolve_mutable_state(env)
+            if mutable_state is None:
+                return ModuleResult(decision="failed", error="missing_mutable_state")
 
             # Pre-validate via actuator if registered
             if self._actuator is not None:
@@ -81,7 +81,7 @@ class HotLossController:
                     pass  # validation is best-effort
 
             try:
-                self._apply_params(loss_state, params)
+                self._apply_params(mutable_state, params)
                 return ModuleResult(decision="applied", payload=params)
             except Exception as e:
                 handle.last_error = str(e)
@@ -104,10 +104,10 @@ class HotLossController:
             elif isinstance(v, (int, float)):
                 yield k, v
 
-    def _apply_params(self, loss_state: dict, params: dict) -> None:
-        weights = loss_state.setdefault("weights", {})
-        terms = loss_state.setdefault("terms", {})
-        ramps = loss_state.setdefault("ramps", {})
+    def _apply_params(self, mutable_state: dict, params: dict) -> None:
+        weights = mutable_state.setdefault("weights", {})
+        terms = mutable_state.setdefault("terms", {})
+        ramps = mutable_state.setdefault("ramps", {})
 
         for k, v in params.items():
             if k.endswith("_w"):

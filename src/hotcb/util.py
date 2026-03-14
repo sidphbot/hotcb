@@ -55,16 +55,25 @@ def read_new_jsonl(cursor: FileCursor, max_lines: int = 10_000) -> Tuple[List[di
             s = line.strip()
             if not s:
                 continue
-            out.append(json.loads(s))
+            try:
+                out.append(json.loads(s))
+            except json.JSONDecodeError:
+                continue
         new_offset = f.tell()
     return out, FileCursor(path=cursor.path, offset=new_offset)
 
 
 def append_jsonl(path: str, obj: dict) -> None:
-    """Append a single JSON object to a JSONL file (creates parent dirs)."""
+    """Append a single JSON object as a line to a JSONL file (with file locking)."""
+    import fcntl
     ensure_dir(os.path.dirname(path))
+    line = json.dumps(sanitize_floats(obj), ensure_ascii=False) + "\n"
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(line)
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def dedupe_keep_order(items: Iterable[Any]) -> List[Any]:
@@ -80,6 +89,20 @@ def dedupe_keep_order(items: Iterable[Any]) -> List[Any]:
         seen_ids.add(k)
         out.append(x)
     return out
+
+
+def sanitize_floats(obj: Any) -> Any:
+    """Replace NaN/inf/-inf with None recursively in dicts/lists for JSON safety."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_floats(v) for v in obj]
+    return obj
 
 
 def now() -> float:

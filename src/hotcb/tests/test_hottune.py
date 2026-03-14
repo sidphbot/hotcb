@@ -12,7 +12,7 @@ import pytest
 
 from hotcb.actuators.base import ApplyResult, ValidationResult
 from hotcb.actuators.optimizer import OptimizerActuator
-from hotcb.actuators.loss_state import LossStateActuator
+from hotcb.actuators.mutable_state import MutableStateActuator
 from hotcb.modules.tune.schemas import (
     AcceptanceConfig,
     ActuatorConfig,
@@ -48,7 +48,7 @@ def make_env(
     epoch=1,
     phase="val",
     optimizer=None,
-    loss_state=None,
+    mutable_state=None,
     loss=None,
     metric_fn=None,
     max_steps=1000,
@@ -61,8 +61,8 @@ def make_env(
     }
     if optimizer is not None:
         env["optimizer"] = optimizer
-    if loss_state is not None:
-        env["loss_state"] = loss_state
+    if mutable_state is not None:
+        env["mutable_state"] = mutable_state
     if loss is not None:
         env["loss"] = loss
     if metric_fn is not None:
@@ -184,11 +184,11 @@ class TestOptimizerActuator:
         assert opt.param_groups[0]["lr"] == 1.0  # clamped
 
 
-class TestLossStateActuator:
+class TestMutableStateActuator:
     def test_snapshot_and_restore(self):
         ls = {"weights": {"main": 1.0, "aux": 0.5}}
-        env = {"loss_state": ls}
-        act = LossStateActuator()
+        env = {"mutable_state": ls}
+        act = MutableStateActuator()
 
         snap = act.snapshot(env)
         assert snap["weights"]["main"] == 1.0
@@ -199,51 +199,51 @@ class TestLossStateActuator:
         assert ls["weights"]["main"] == 1.0
 
     def test_validate_set(self):
-        act = LossStateActuator(global_bounds=(0.0, 10.0))
+        act = MutableStateActuator(global_bounds=(0.0, 10.0))
         ls = {"weights": {"main": 1.0}}
-        env = {"loss_state": ls}
+        env = {"mutable_state": ls}
         assert act.validate({"op": "set", "key": "main", "value": 5.0}, env).valid
         assert not act.validate({"op": "set", "key": "main", "value": 11.0}, env).valid
 
     def test_validate_mult_bounds(self):
-        act = LossStateActuator(global_bounds=(0.0, 10.0))
+        act = MutableStateActuator(global_bounds=(0.0, 10.0))
         ls = {"weights": {"main": 5.0}}
-        env = {"loss_state": ls}
+        env = {"mutable_state": ls}
         assert not act.validate({"op": "mult", "key": "main", "value": 3.0}, env).valid  # 15 > 10
 
     def test_apply_set(self):
         ls = {"weights": {"main": 1.0}}
-        env = {"loss_state": ls}
-        act = LossStateActuator()
+        env = {"mutable_state": ls}
+        act = MutableStateActuator()
         result = act.apply({"op": "set", "key": "main", "value": 2.0}, env)
         assert result.success
         assert ls["weights"]["main"] == 2.0
 
     def test_apply_mult(self):
         ls = {"weights": {"main": 1.0}}
-        env = {"loss_state": ls}
-        act = LossStateActuator()
+        env = {"mutable_state": ls}
+        act = MutableStateActuator()
         result = act.apply({"op": "mult", "key": "main", "value": 1.5}, env)
         assert result.success
         assert ls["weights"]["main"] == pytest.approx(1.5)
 
     def test_apply_delta(self):
         ls = {"weights": {"main": 1.0}}
-        env = {"loss_state": ls}
-        act = LossStateActuator()
+        env = {"mutable_state": ls}
+        act = MutableStateActuator()
         result = act.apply({"op": "delta", "key": "main", "value": 0.3}, env)
         assert result.success
         assert ls["weights"]["main"] == pytest.approx(1.3)
 
-    def test_apply_missing_loss_state(self):
-        act = LossStateActuator()
+    def test_apply_missing_mutable_state(self):
+        act = MutableStateActuator()
         result = act.apply({"op": "set", "key": "main", "value": 1.0}, {})
         assert not result.success
 
     def test_key_bounds(self):
-        act = LossStateActuator(key_bounds={"main": (0.5, 1.5)})
+        act = MutableStateActuator(key_bounds={"main": (0.5, 1.5)})
         ls = {"weights": {"main": 1.0}}
-        env = {"loss_state": ls}
+        env = {"mutable_state": ls}
         assert not act.validate({"op": "set", "key": "main", "value": 2.0}, env).valid
         assert act.validate({"op": "set", "key": "main", "value": 1.2}, env).valid
 
@@ -539,12 +539,12 @@ class TestHotTuneController:
         opt = FakeOptimizer(lr=0.001)
         ctrl.register_actuator("opt", OptimizerActuator())
         ls = {"weights": {"main_w": 1.0}}
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
         def metric_fn(name, default=None):
             return {"val/loss": 0.5}.get(name, default)
 
-        env = make_env(optimizer=opt, loss_state=ls, metric_fn=metric_fn)
+        env = make_env(optimizer=opt, mutable_state=ls, metric_fn=metric_fn)
         ctrl.on_event("val_epoch_end", env)
         assert ctrl.state.mutation_counter >= 1
         assert ctrl.state.active_mutation is not None
@@ -558,7 +558,7 @@ class TestHotTuneController:
         opt = FakeOptimizer(lr=0.001)
         ls = {"weights": {"main_w": 1.0}}
         ctrl.register_actuator("opt", OptimizerActuator())
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
         # First val_epoch_end: proposes and applies mutation
         metrics_val = [0.5]
@@ -568,13 +568,13 @@ class TestHotTuneController:
                 return metrics_val[0]
             return default
 
-        env = make_env(step=100, optimizer=opt, loss_state=ls, metric_fn=metric_fn)
+        env = make_env(step=100, optimizer=opt, mutable_state=ls, metric_fn=metric_fn)
         ctrl.on_event("val_epoch_end", env)
         assert ctrl.state.active_segment is not None
 
         # Second val_epoch_end: evaluates the segment
         metrics_val[0] = 0.3  # improvement
-        env = make_env(step=200, optimizer=opt, loss_state=ls, metric_fn=metric_fn)
+        env = make_env(step=200, optimizer=opt, mutable_state=ls, metric_fn=metric_fn)
         ctrl.on_event("val_epoch_end", env)
 
         # Segment should have been evaluated
@@ -590,7 +590,7 @@ class TestHotTuneController:
         opt = FakeOptimizer(lr=0.001)
         ls = {"weights": {"main_w": 1.0}}
         ctrl.register_actuator("opt", OptimizerActuator())
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
         original_lr = opt.param_groups[0]["lr"]
 
@@ -601,13 +601,13 @@ class TestHotTuneController:
                 return metrics_val[0]
             return default
 
-        env = make_env(step=100, optimizer=opt, loss_state=ls, metric_fn=metric_fn)
+        env = make_env(step=100, optimizer=opt, mutable_state=ls, metric_fn=metric_fn)
         ctrl.on_event("val_epoch_end", env)
         assert ctrl.state.active_segment is not None
 
         # Regression
         metrics_val[0] = 0.6
-        env = make_env(step=200, optimizer=opt, loss_state=ls, metric_fn=metric_fn)
+        env = make_env(step=200, optimizer=opt, mutable_state=ls, metric_fn=metric_fn)
         ctrl.on_event("val_epoch_end", env)
 
         assert len(ctrl.state.history) == 1
@@ -773,7 +773,7 @@ class TestSuggestMode:
         opt = FakeOptimizer(lr=0.001)
         ls = {"weights": {"main_w": 1.0}}
         ctrl.register_actuator("opt", OptimizerActuator())
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
         original_lr = opt.param_groups[0]["lr"]
         original_w = ls["weights"]["main_w"]
@@ -781,7 +781,7 @@ class TestSuggestMode:
         def metric_fn(name, default=None):
             return {"val/loss": 0.5}.get(name, default)
 
-        env = make_env(optimizer=opt, loss_state=ls, metric_fn=metric_fn)
+        env = make_env(optimizer=opt, mutable_state=ls, metric_fn=metric_fn)
         ctrl.on_event("val_epoch_end", env)
 
         # Mutation should be logged as suggested
@@ -940,7 +940,7 @@ class TestDeterministicSimulation:
         opt = FakeOptimizer(lr=0.001)
         ls = {"weights": {"main_w": 1.0}}
         ctrl.register_actuator("opt", OptimizerActuator())
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
         for epoch in range(num_epochs):
             step = epoch * 100
@@ -953,7 +953,7 @@ class TestDeterministicSimulation:
 
             env = make_env(
                 step=step, epoch=epoch, optimizer=opt,
-                loss_state=ls, loss=current_loss,
+                mutable_state=ls, loss=current_loss,
                 metric_fn=metric_fn, max_steps=num_epochs * 100,
             )
             ctrl.on_event("val_epoch_end", env)
@@ -995,7 +995,7 @@ class TestDeterministicSimulation:
         ctrl.state.mode = "active"
         opt = FakeOptimizer(lr=0.001)
         ctrl.register_actuator("opt", OptimizerActuator())
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
         env = make_env(step=100, optimizer=opt, loss=float("nan"))
         ctrl.on_event("val_epoch_end", env)
@@ -1016,7 +1016,7 @@ class TestDeterministicSimulation:
         opt = FakeOptimizer(lr=0.001)
         ls = {"weights": {"main_w": 1.0}}
         ctrl.register_actuator("opt", OptimizerActuator())
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
         for i, loss_val in enumerate(losses):
             def metric_fn(name, default=None, _v=loss_val):
@@ -1024,7 +1024,7 @@ class TestDeterministicSimulation:
 
             env = make_env(
                 step=i * 100, epoch=i, optimizer=opt,
-                loss_state=ls, loss=loss_val, metric_fn=metric_fn,
+                mutable_state=ls, loss=loss_val, metric_fn=metric_fn,
             )
             ctrl.on_event("val_epoch_end", env)
 
@@ -1070,14 +1070,14 @@ class TestFailureModes:
         opt = FakeOptimizer(lr=0.001)
         ls = {"weights": {"main_w": 1.0}}
         ctrl.register_actuator("opt", OptimizerActuator())
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
         metrics_val = [0.5]
 
         def metric_fn(name, default=None):
             return metrics_val[0] if name == "val/loss" else default
 
-        env = make_env(step=100, optimizer=opt, loss_state=ls, metric_fn=metric_fn)
+        env = make_env(step=100, optimizer=opt, mutable_state=ls, metric_fn=metric_fn)
         ctrl.on_event("val_epoch_end", env)
 
         if ctrl.state.active_segment:
@@ -1099,9 +1099,9 @@ class TestFailureModes:
         opt = FakeOptimizer(lr=0.001)
         ls = {"weights": {"main_w": 1.0}}
         ctrl.register_actuator("opt", OptimizerActuator())
-        ctrl.register_actuator("loss", LossStateActuator())
+        ctrl.register_actuator("loss", MutableStateActuator())
 
-        env = make_env(step=100, optimizer=opt, loss_state=ls)
+        env = make_env(step=100, optimizer=opt, mutable_state=ls)
         # No metric_fn in env
         ctrl.on_event("val_epoch_end", env)
         # Should not crash, may or may not propose
@@ -1163,15 +1163,15 @@ class TestFailureModes:
         assert any("missing value" in e for e in result.errors)
 
     def test_loss_actuator_validate_missing_key(self):
-        act = LossStateActuator()
-        env = {"loss_state": {"weights": {}}}
+        act = MutableStateActuator()
+        env = {"mutable_state": {"weights": {}}}
         result = act.validate({"op": "set", "value": 1.0}, env)
         assert not result.valid
         assert any("missing key" in e for e in result.errors)
 
     def test_loss_actuator_validate_non_numeric(self):
-        act = LossStateActuator()
-        env = {"loss_state": {"weights": {}}}
+        act = MutableStateActuator()
+        env = {"mutable_state": {"weights": {}}}
         result = act.validate({"op": "set", "key": "x", "value": "bad"}, env)
         assert not result.valid
 

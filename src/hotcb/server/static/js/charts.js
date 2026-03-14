@@ -9,6 +9,46 @@ var _forecastCache = {};  // metric -> {forecast, mutation}
 // Highlighted mutation step (set when user clicks a timeline item)
 var _highlightedMutationStep = null;
 
+// Step range control: 'all' | 'last200' | 'last500' | {min, max}
+var _chartStepRange = 'all';
+
+// Max points to render per dataset (avoids sluggish charts on very long runs)
+var _maxRenderPoints = 2000;
+
+/**
+ * LTTB (Largest-Triangle-Three-Buckets) downsampling.
+ * Takes [{x, y}] and returns a reduced array preserving visual shape.
+ */
+function _lttbDownsample(data, threshold) {
+  if (data.length <= threshold) return data;
+  var sampled = [data[0]];  // always keep first
+  var bucketSize = (data.length - 2) / (threshold - 2);
+  var a = 0;  // index of previously selected point
+  for (var i = 0; i < threshold - 2; i++) {
+    // Calculate bucket range
+    var bStart = Math.floor((i + 1) * bucketSize) + 1;
+    var bEnd   = Math.min(Math.floor((i + 2) * bucketSize) + 1, data.length - 1);
+    // Average of next bucket (for triangle area calc)
+    var avgX = 0, avgY = 0, cnt = 0;
+    var nbStart = Math.floor((i + 2) * bucketSize) + 1;
+    var nbEnd   = Math.min(Math.floor((i + 3) * bucketSize) + 1, data.length - 1);
+    if (nbStart > data.length - 1) { nbStart = data.length - 1; nbEnd = data.length - 1; }
+    for (var j = nbStart; j <= nbEnd; j++) { avgX += data[j].x; avgY += data[j].y; cnt++; }
+    avgX /= cnt; avgY /= cnt;
+    // Pick point in current bucket with largest triangle area
+    var maxArea = -1, maxIdx = bStart;
+    var ax = data[a].x, ay = data[a].y;
+    for (var k = bStart; k <= bEnd; k++) {
+      var area = Math.abs((ax - avgX) * (data[k].y - ay) - (ax - data[k].x) * (avgY - ay));
+      if (area > maxArea) { maxArea = area; maxIdx = k; }
+    }
+    sampled.push(data[maxIdx]);
+    a = maxIdx;
+  }
+  sampled.push(data[data.length - 1]);  // always keep last
+  return sampled;
+}
+
 // ---- Mutation annotation plugin for Chart.js ----
 var mutationAnnotationPlugin = {
   id: 'mutationAnnotations',
@@ -21,12 +61,19 @@ var mutationAnnotationPlugin = {
     var top = yScale.top;
     var bottom = yScale.bottom;
 
+    // Determine actual data range — skip annotations outside metric data
+    var dataMinStep = _getMinStep();
+    var dataMaxStep = _getMaxStep();
+    if (dataMaxStep === 0) return;  // no metric data yet
+
     // Collect visible annotations with pixel positions for staggering
     var annotations = [];
     S.appliedData.forEach(function(rec) {
       var step = rec.step;
       if (step === undefined || step === null) return;
+      // Filter to both visible x-axis range AND actual data range
       if (step < xScale.min || step > xScale.max) return;
+      if (step < dataMinStep || step > dataMaxStep) return;
       var x = xScale.getPixelForValue(step);
       annotations.push({rec: rec, x: x, step: step});
     });
@@ -73,12 +120,16 @@ var mutationAnnotationPlugin = {
 
       // Build compact label — split into multiple lines if needed
       var lines = [];
-      if (rec.params && typeof rec.params === 'object') {
-        var keys = Object.keys(rec.params);
+      var annotParams = (rec.params && typeof rec.params === 'object') ? rec.params :
+                        (rec.payload && typeof rec.payload === 'object') ? rec.payload : null;
+      if (annotParams) {
+        var keys = Object.keys(annotParams);
         keys.slice(0, 3).forEach(function(k) {
-          var v = rec.params[k];
+          var v = annotParams[k];
           if (typeof v === 'number') {
             v = v < 0.01 || v > 1e4 ? v.toExponential(1) : parseFloat(v.toPrecision(3));
+          } else if (typeof v === 'object' && v !== null) {
+            v = JSON.stringify(v);
           }
           lines.push(k + '\u2192' + v);
         });
@@ -127,6 +178,14 @@ var mutationAnnotationPlugin = {
 
 // Register the plugin globally
 Chart.register(mutationAnnotationPlugin);
+
+// Custom tooltip positioner — show to the right of the cursor
+Chart.Tooltip.positioners.rightOfCursor = function(elements, eventPosition) {
+  return {
+    x: eventPosition.x + 15,
+    y: eventPosition.y
+  };
+};
 
 // ---- Linear regression slope helper ----
 function _linregSlope(points) {
@@ -285,13 +344,14 @@ function scrollChartToStep(step) {
   var xScale = S.chartInstance.scales.x;
   if (!xScale) return;
   var range = xScale.max - xScale.min;
-  if (range <= 0) return;
+  if (range <= 0) range = 200;
   // Only adjust if the step is outside the visible range
   if (step >= xScale.min && step <= xScale.max) return;
   var half = range / 2;
-  S.chartInstance.options.scales.x.min = step - half;
-  S.chartInstance.options.scales.x.max = step + half;
+  _chartStepRange = { min: Math.max(0, step - half), max: step + half };
+  _applyChartStepRange();
   S.chartInstance.update('none');
+  _updateRangeButtons();
 }
 
 function createMetricsChart() {
@@ -309,10 +369,14 @@ function createMetricsChart() {
       },
       plugins: {
         legend: {display:false},
-        tooltip: { backgroundColor:'#121c2b', borderColor:'#2a4060', borderWidth:1,
-                   titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:11} }
+        tooltip: { backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--bg-card').trim() || '#121c2b',
+                   borderColor: getComputedStyle(document.documentElement).getPropertyValue('--border-bright').trim() || '#2a4060', borderWidth:1,
+                   titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:11},
+                   usePointStyle: true, boxWidth: 8, boxHeight: 8,
+                   intersect: false, mode: 'nearest', axis: 'x', position: 'rightOfCursor' }
       },
-      elements: { point: {radius:0, hoverRadius:3}, line: {borderWidth:1.5, tension:0.3} }
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
+      elements: { point: {radius:0, hoverRadius:5, hitRadius:10}, line: {borderWidth:1.5, tension:0.15} }
     }
   });
 }
@@ -335,21 +399,27 @@ function updateChart() {
     var pts = S.metricsData[name] || [];
     var color = getColor(name);
 
-    // Live data line
+    // Live data line (LTTB-downsampled for rendering performance)
+    var chartPts = pts.map(function(p) { return {x: p.step, y: p.value}; });
+    chartPts = _lttbDownsample(chartPts, _maxRenderPoints);
     datasets.push({
       label: name,
-      data: pts.map(function(p) { return {x: p.step, y: p.value}; }),
+      data: chartPts,
       borderColor: color,
       backgroundColor: 'transparent',
-      tension: 0.3,
+      tension: 0.15,
     });
 
     var lastStep = pts.length ? pts[pts.length - 1].step : 0;
     var lastVal = pts.length ? pts[pts.length - 1].value : null;
     var cache = _forecastCache[name];
+    var showOverlays = S.focusMetric === name || (S.pinnedMetrics && S.pinnedMetrics.has(name));
 
-    // Forecast overlay (dotted extension in same color but lighter)
-    if (cache && cache.forecast && cache.forecast.values && cache.forecast.values.length) {
+    // Forecast overlay — only shown for pinned or focused metrics to reduce clutter
+    // Guard: only render if forecast steps are contiguous with current data (avoids stale cross-run connectors)
+    if (showOverlays && cache && cache.forecast && cache.forecast.values && cache.forecast.values.length
+        && lastStep > 0 && lastVal !== null
+        && cache.forecast.steps && cache.forecast.steps[0] <= lastStep + 50) {
       var fc = cache.forecast;
       var fcPts = [{x: lastStep, y: lastVal}];  // Connect to last actual point
       fc.values.forEach(function(v, i) { fcPts.push({x: fc.steps[i], y: v}); });
@@ -359,7 +429,7 @@ function updateChart() {
         borderColor: color,
         borderDash: [6, 3],
         backgroundColor: 'transparent',
-        tension: 0.3,
+        tension: 0.15,
         borderWidth: 1.2,
         pointRadius: 0,
       });
@@ -375,41 +445,147 @@ function updateChart() {
           borderColor: 'transparent',
           backgroundColor: hexToRgba(color, 0.06),
           fill: '+1',
-          pointRadius: 0, tension: 0.3,
+          pointRadius: 0, tension: 0.15,
         });
         datasets.push({
           label: '_' + name + '_hi',
           data: hiPts,
           borderColor: 'transparent',
           backgroundColor: 'transparent',
-          pointRadius: 0, tension: 0.3,
+          pointRadius: 0, tension: 0.15,
         });
       }
     }
 
-    // Mutation impact overlay (cyan dotted)
-    if (cache && cache.mutation && cache.mutation.values && cache.mutation.values.length) {
+    // Mutation impact overlay — only shown for pinned or focused metrics
+    // Guard: only render if fromStep is within current data range (avoids stale cross-run connectors)
+    if (showOverlays && cache && cache.mutation && cache.mutation.values && cache.mutation.values.length) {
       var mu = cache.mutation;
-      var muPts = [{x: mu.fromStep, y: mu.fromVal}];
-      mu.values.forEach(function(v, i) { muPts.push({x: mu.steps[i], y: v}); });
-      datasets.push({
-        label: name + ' post-change',
-        data: muPts,
-        borderColor: 'rgba(51,204,221,0.7)',
-        borderDash: [3, 4],
-        backgroundColor: 'transparent',
-        tension: 0.3,
-        borderWidth: 1.2,
-        pointRadius: 0,
-      });
+      var inDataRange = pts.length > 0 && mu.fromStep >= pts[0].step && mu.fromStep <= pts[pts.length - 1].step;
+      if (inDataRange) {
+        var muPts = [{x: mu.fromStep, y: mu.fromVal}];
+        mu.values.forEach(function(v, i) { muPts.push({x: mu.steps[i], y: v}); });
+        datasets.push({
+          label: name + ' post-change',
+          data: muPts,
+          borderColor: 'rgba(51,204,221,0.7)',
+          borderDash: [3, 4],
+          backgroundColor: 'transparent',
+          tension: 0.15,
+          borderWidth: 1.2,
+          pointRadius: 0,
+        });
+      }
     }
   });
 
   S.chartInstance.data.datasets = datasets;
+
+  // Apply step range to x-axis
+  _applyChartStepRange();
+
   S.chartInstance.update('none');
 
   // Also update any pinned metric cards
   updateMetricCards();
+}
+
+function _getMaxStep() {
+  var maxStep = 0;
+  S.metricNames.forEach(function(name) {
+    var pts = S.metricsData[name] || [];
+    if (pts.length) maxStep = Math.max(maxStep, pts[pts.length - 1].step);
+  });
+  return maxStep;
+}
+
+function _getMinStep() {
+  var minStep = Infinity;
+  S.metricNames.forEach(function(name) {
+    var pts = S.metricsData[name] || [];
+    if (pts.length) minStep = Math.min(minStep, pts[0].step);
+  });
+  return minStep === Infinity ? 0 : minStep;
+}
+
+function _applyChartStepRange() {
+  if (!S.chartInstance) return;
+  var xOpts = S.chartInstance.options.scales.x;
+  if (_chartStepRange === 'all') {
+    delete xOpts.min;
+    delete xOpts.max;
+  } else if (_chartStepRange === 'last200') {
+    var mx = _getMaxStep();
+    xOpts.min = Math.max(0, mx - 200);
+    delete xOpts.max;
+  } else if (_chartStepRange === 'last500') {
+    var mx2 = _getMaxStep();
+    xOpts.min = Math.max(0, mx2 - 500);
+    delete xOpts.max;
+  } else if (typeof _chartStepRange === 'object' && _chartStepRange !== null) {
+    xOpts.min = _chartStepRange.min;
+    xOpts.max = _chartStepRange.max;
+  }
+}
+
+function setChartStepRange(mode) {
+  _chartStepRange = mode;
+  updateChart();
+  _updateRangeButtons();
+}
+
+function _updateRangeButtons() {
+  var btns = document.querySelectorAll('#stepRangeControls .range-btn[data-range]');
+  btns.forEach(function(btn) {
+    var isActive = (typeof _chartStepRange === 'string' && btn.dataset.range === _chartStepRange);
+    btn.classList.toggle('active', isActive);
+  });
+  // Update custom inputs if range is a custom object
+  var minEl = document.getElementById('rangeMin');
+  var maxEl = document.getElementById('rangeMax');
+  if (minEl && maxEl) {
+    if (typeof _chartStepRange === 'object' && _chartStepRange !== null) {
+      minEl.value = _chartStepRange.min != null ? _chartStepRange.min : '';
+      maxEl.value = _chartStepRange.max != null ? _chartStepRange.max : '';
+    }
+  }
+}
+
+function initStepRangeControls() {
+  var container = document.getElementById('stepRangeControls');
+  if (!container) return;
+
+  // Preset buttons
+  container.querySelectorAll('.range-btn[data-range]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      setChartStepRange(btn.dataset.range);
+    });
+  });
+
+  // Custom range apply
+  var applyBtn = document.getElementById('rangeApply');
+  var minEl = document.getElementById('rangeMin');
+  var maxEl = document.getElementById('rangeMax');
+  if (applyBtn && minEl && maxEl) {
+    applyBtn.addEventListener('click', function() {
+      var mn = minEl.value !== '' ? parseInt(minEl.value, 10) : undefined;
+      var mx = maxEl.value !== '' ? parseInt(maxEl.value, 10) : undefined;
+      if (mn === undefined && mx === undefined) {
+        setChartStepRange('all');
+      } else {
+        setChartStepRange({
+          min: mn !== undefined ? mn : 0,
+          max: mx !== undefined ? mx : undefined
+        });
+      }
+    });
+    // Enter key in inputs triggers apply
+    [minEl, maxEl].forEach(function(el) {
+      el.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') applyBtn.click();
+      });
+    });
+  }
 }
 
 function hexToRgba(hex, alpha) {
@@ -421,6 +597,7 @@ function hexToRgba(hex, alpha) {
 
 var _metricToggleState = {};  // metric name -> boolean (checked)
 var _metricDropdownShowAll = false;
+var _dropdownCloseHandler = null;
 var _commonMetricPatterns = [
   'train_loss', 'val_loss', 'loss', 'accuracy', 'val_accuracy',
   'train_accuracy', 'lr', 'learning_rate', 'grad_norm', 'grad_norm_total',
@@ -583,49 +760,72 @@ function _renderMetricDropdown(container) {
   var visible = _getVisibleMetrics();
   visible.forEach(function(name) {
     var color = getColor(name);
-    var row = document.createElement('label');
+    var row = document.createElement('div');
     row.className = 'metric-dropdown-item';
 
-    var cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = !!_metricToggleState[name];
-    cb.dataset.metric = name;
-    cb.addEventListener('change', function(e) {
+    var isActive = !!_metricToggleState[name];
+    var isPinned = S.pinnedMetrics && S.pinnedMetrics.has(name);
+
+    // Filled/hollow dot toggle (replaces checkbox + swatch)
+    var dot = document.createElement('span');
+    dot.className = 'metric-dot' + (isActive ? ' active' : '') + (isPinned ? ' pinned' : '');
+    dot.style.color = color;
+    dot.style.borderColor = color;
+    if (isActive) dot.style.background = color;
+    dot.title = isActive ? 'Hide metric' : 'Show metric';
+    dot.addEventListener('click', function(e) {
       e.stopPropagation();
-      _metricToggleState[name] = cb.checked;
-      // Update the badge count
+      _metricToggleState[name] = !_metricToggleState[name];
       var cnt = 0;
       S.metricNames.forEach(function(n) { if (_metricToggleState[n]) cnt++; });
       var badge = wrapper.querySelector('.metric-count-badge');
       if (badge) badge.textContent = cnt + '/' + totalCount;
+      _renderMetricDropdown(container);
       updateChart();
     });
-
-    var swatch = document.createElement('span');
-    swatch.className = 'swatch';
-    swatch.style.background = color;
-
-    var label = document.createElement('span');
-    label.className = 'metric-dropdown-name';
-    label.textContent = name;
-
-    var pinBtn = document.createElement('button');
-    var isPinned = S.pinnedMetrics && S.pinnedMetrics.has(name);
-    pinBtn.className = 'pin-btn' + (isPinned ? ' pin-btn-active' : '');
-    pinBtn.dataset.metric = name;
-    pinBtn.title = isPinned ? 'Unpin metric card' : 'Pin metric card';
-    pinBtn.innerHTML = '&#128204;';
-    pinBtn.addEventListener('click', function(e) {
-      e.preventDefault();
-      e.stopPropagation();
+    // Double-click or right-click to toggle pin
+    dot.addEventListener('dblclick', function(e) {
+      e.stopPropagation(); e.preventDefault();
+      toggleMetricCard(name);
+      _renderMetricDropdown(container);
+    });
+    dot.addEventListener('contextmenu', function(e) {
+      e.preventDefault(); e.stopPropagation();
       toggleMetricCard(name);
       _renderMetricDropdown(container);
     });
 
-    row.appendChild(cb);
-    row.appendChild(swatch);
+    var label = document.createElement('span');
+    label.className = 'metric-dropdown-name';
+    label.textContent = name;
+    label.addEventListener('click', function(e) {
+      e.stopPropagation();
+      _metricToggleState[name] = !_metricToggleState[name];
+      var cnt = 0;
+      S.metricNames.forEach(function(n) { if (_metricToggleState[n]) cnt++; });
+      var badge = wrapper.querySelector('.metric-count-badge');
+      if (badge) badge.textContent = cnt + '/' + totalCount;
+      _renderMetricDropdown(container);
+      updateChart();
+    });
+
+    row.appendChild(dot);
     row.appendChild(label);
-    row.appendChild(pinBtn);
+
+    // Pin indicator — visible icon when metric is pinned
+    if (isPinned) {
+      var pinIcon = document.createElement('span');
+      pinIcon.className = 'metric-pin-icon';
+      pinIcon.textContent = '\u{1F4CC}';
+      pinIcon.title = 'Pinned \u2014 double-click dot to unpin';
+      pinIcon.addEventListener('click', function(e) {
+        e.stopPropagation();
+        toggleMetricCard(name);
+        _renderMetricDropdown(container);
+      });
+      row.appendChild(pinIcon);
+    }
+
     list.appendChild(row);
   });
 
@@ -642,13 +842,19 @@ function _renderMetricDropdown(container) {
   panel.appendChild(list);
   wrapper.appendChild(panel);
 
-  // Close dropdown when clicking outside
-  document.addEventListener('click', function closeDropdown(e) {
-    if (!wrapper.contains(e.target)) {
-      var p = wrapper.querySelector('.metric-dropdown-panel');
-      if (p) p.classList.remove('open');
-    }
-  });
+  // Close dropdown when clicking outside (single delegated listener)
+  if (!_dropdownCloseHandler) {
+    _dropdownCloseHandler = function(e) {
+      var wraps = document.querySelectorAll('.metric-dropdown-wrap');
+      wraps.forEach(function(w) {
+        if (!w.contains(e.target)) {
+          var p = w.querySelector('.metric-dropdown-panel');
+          if (p) p.classList.remove('open');
+        }
+      });
+    };
+    document.addEventListener('click', _dropdownCloseHandler);
+  }
 }
 
 // ---- Per-metric pinnable cards ----
@@ -746,12 +952,14 @@ function updateSingleMetricCard(name) {
   var color = getColor(name);
   var pts = S.metricsData[name] || [];
 
+  var chartPts = pts.map(function(p) { return {x: p.step, y: p.value}; });
+  chartPts = _lttbDownsample(chartPts, 500);  // mini cards need fewer points
   datasets.push({
     label: name,
-    data: pts.map(function(p) { return {x: p.step, y: p.value}; }),
+    data: chartPts,
     borderColor: color,
     backgroundColor: 'transparent',
-    tension: 0.3,
+    tension: 0.15,
   });
 
   var lastStep = pts.length ? pts[pts.length - 1].step : 0;
@@ -767,7 +975,7 @@ function updateSingleMetricCard(name) {
       label: 'forecast',
       data: fcPts,
       borderColor: color, borderDash: [6, 3],
-      backgroundColor: 'transparent', tension: 0.3, borderWidth: 1.2, pointRadius: 0,
+      backgroundColor: 'transparent', tension: 0.15, borderWidth: 1.2, pointRadius: 0,
     });
   }
 
@@ -780,7 +988,7 @@ function updateSingleMetricCard(name) {
       label: 'post-change',
       data: muPts,
       borderColor: 'rgba(51,204,221,0.7)', borderDash: [3, 4],
-      backgroundColor: 'transparent', tension: 0.3, borderWidth: 1.2, pointRadius: 0,
+      backgroundColor: 'transparent', tension: 0.15, borderWidth: 1.2, pointRadius: 0,
     });
   }
 
@@ -819,17 +1027,31 @@ async function fetchAllForecasts() {
     return;
   }
   _forecastInFlight = true;
-  var promises = [];
-  S.metricNames.forEach(function(name) {
-    promises.push(fetchForecastForMetric(name));
-  });
-  await Promise.all(promises);
+  // Only fetch forecasts for pinned or focused metrics — not all metrics
+  var names = [];
+  if (S.focusMetric) {
+    names.push(S.focusMetric);
+  }
+  if (S.pinnedMetrics) {
+    S.pinnedMetrics.forEach(function(name) {
+      if (names.indexOf(name) === -1) names.push(name);
+    });
+  }
+  if (names.length === 0) {
+    _forecastInFlight = false;
+    return;
+  }
+  var batchSize = 4;
+  for (var i = 0; i < names.length; i += batchSize) {
+    var batch = names.slice(i, i + batchSize);
+    await Promise.all(batch.map(fetchForecastForMetric));
+  }
   _forecastInFlight = false;
   updateChart();
   // If new data arrived while we were fetching, refresh again
   if (_forecastPendingRefresh) {
     _forecastPendingRefresh = false;
-    setTimeout(fetchAllForecasts, 500);
+    setTimeout(fetchAllForecasts, 1000);
   }
 }
 
@@ -842,17 +1064,29 @@ async function fetchForecastForMetric(name) {
 
 function startForecastPolling() {
   if (_forecastTimer) clearInterval(_forecastTimer);
-  // Poll every 5s as a baseline, but also triggered on new metrics
-  _forecastTimer = setInterval(fetchAllForecasts, 5000);
-  fetchAllForecasts();
+  // Poll every 10s as a baseline — new metrics also trigger refresh via onNewMetricsForForecast
+  _forecastTimer = setInterval(function() {
+    // Only fetch if we have pinned/focused metrics to avoid wasted work
+    if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
+      fetchAllForecasts();
+    }
+  }, 10000);
+  // Delay initial fetch to let the dashboard settle
+  setTimeout(function() {
+    if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
+      fetchAllForecasts();
+    }
+  }, 3000);
 }
 
 // Called from websocket when new metrics arrive — trigger forecast refresh
 function onNewMetricsForForecast(maxStep) {
-  // Only trigger every 10 steps to avoid flooding
-  if (maxStep - _lastForecastStep >= 10) {
+  // Only trigger every 20 steps, and only if there are pinned/focused metrics
+  if (maxStep - _lastForecastStep >= 20) {
     _lastForecastStep = maxStep;
-    fetchAllForecasts();
+    if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
+      fetchAllForecasts();
+    }
   }
 }
 

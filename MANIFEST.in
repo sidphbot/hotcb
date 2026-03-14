@@ -1,0 +1,3 @@
+recursive-include src/hotcb/server/static *
+recursive-include src/hotcb/server/guidelines *.yaml
+include src/hotcb/server/ai_system_prompt.yaml

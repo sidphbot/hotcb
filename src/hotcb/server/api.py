@@ -90,6 +90,65 @@ async def loss_set(body: LossSetRequest, request: Request):
     return {"status": "queued", "command": cmd}
 
 
+@router.get("/loss/params")
+async def loss_params(request: Request):
+    """Return current loss weight values from the latest metrics or applied ledger."""
+    run_dir: str = request.app.state.run_dir
+
+    # Strategy 1: read from latest metrics (most up-to-date)
+    metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")
+    latest_metrics: Dict[str, Any] = {}
+    if os.path.exists(metrics_path):
+        last_line = ""
+        with open(metrics_path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped:
+                    last_line = stripped
+        if last_line:
+            try:
+                rec = json.loads(last_line)
+                latest_metrics = rec.get("metrics", {})
+            except json.JSONDecodeError:
+                pass
+
+    # Strategy 2: read last applied loss params
+    applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
+    last_applied: Dict[str, Any] = {}
+    if os.path.exists(applied_path):
+        with open(applied_path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    rec = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("module") == "loss" and rec.get("decision") == "applied":
+                    p = rec.get("params") or rec.get("payload")
+                    if p:
+                        last_applied.update(p)
+
+    # Strategy 3: read from capabilities file for key names
+    from ..capabilities import TrainingCapabilities
+    caps = TrainingCapabilities.load(run_dir)
+    mutable_keys = list(caps.mutable_state_keys) if caps and caps.mutable_state_keys else []
+
+    # Extract weight-related metrics (w/* prefix from training loop logging)
+    current_weights: Dict[str, float] = {}
+    for k, v in latest_metrics.items():
+        if k.startswith("train_w/"):
+            key = k.replace("train_w/", "")
+            current_weights[key] = v
+
+    return {
+        "mutable_state_keys": mutable_keys,
+        "current_weights": current_weights,
+        "last_applied": last_applied,
+    }
+
+
 @router.post("/tune/mode")
 async def tune_mode(body: TuneModeRequest, request: Request):
     op = "enable" if body.mode != "off" else "disable"
@@ -156,6 +215,19 @@ async def cb_load(body: CbLoadRequest, request: Request):
         "params": {"path": body.path},
     }
     request.app.state.cb_registry = cb_registry
+    return {"status": "queued", "command": cmd}
+
+
+class CbSetParamsRequest(BaseModel):
+    id: str = "main"
+    params: Dict[str, Any] = Field(..., min_length=1)
+
+
+@router.post("/cb/set_params")
+async def cb_set_params(body: CbSetParamsRequest, request: Request):
+    """Set parameters on a callback."""
+    cmd = {"module": "cb", "op": "set_params", "id": body.id, "params": body.params}
+    _append(request, cmd)
     return {"status": "queued", "command": cmd}
 
 

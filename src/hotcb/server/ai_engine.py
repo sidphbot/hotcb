@@ -320,18 +320,27 @@ class LLMAutopilotEngine:
             cost_usd=cost,
         )
 
-        # Process next_check
+        # Process next_check — cap all values to prevent exponential sleep
         nc = parsed["next_check"]
         nc_mode = nc.get("mode", "periodic")
+        max_wait = max(self.config.cadence * 4, 200)  # never wait more than 4x cadence or 200 steps
         if nc_mode == "at_step":
-            self.state.next_check_step = nc.get("step")
+            requested_step = nc.get("step", step + self.config.cadence)
+            # Cap: don't let AI schedule more than max_wait steps ahead
+            capped_step = min(requested_step, step + max_wait)
+            self.state.next_check_step = capped_step
         elif nc_mode == "in_n_steps":
-            self.state.next_check_step = step + nc.get("n", 50)
+            n = min(nc.get("n", 50), max_wait)
+            self.state.next_check_step = step + n
         elif nc_mode == "on_next_alert":
-            self.state.next_check_step = None  # will fire on next alert
-            self.state.cadence_override = 999999  # effectively disable periodic
+            # Still set a periodic fallback so we don't sleep forever
+            self.state.next_check_step = step + max_wait
+            self.state.cadence_override = max_wait
         elif nc_mode == "periodic":
             interval = nc.get("interval", self.config.cadence)
+            # Cap periodic interval
+            interval = min(interval, max_wait)
+            interval = max(interval, 10)  # minimum 10 steps
             self.state.cadence_override = interval
             self.state.next_check_step = None
 

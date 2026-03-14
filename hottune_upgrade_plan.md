@@ -1,4 +1,4 @@
-Your current architecture already supports the key runtime pieces: the Lightning adapter injects `optimizer`, `scheduler`, and optional `loss_state` into `env`, and the kernel already owns run paths, polling, recipe replay, ledger writing, and module dispatch for `cb`, `opt`, and `loss`. That means `hottune` can fit naturally as another kernel module rather than a separate repo.
+Your current architecture already supports the key runtime pieces: the Lightning adapter injects `optimizer`, `scheduler`, and optional `mutable_state` into `env`, and the kernel already owns run paths, polling, recipe replay, ledger writing, and module dispatch for `cb`, `opt`, and `loss`. That means `hottune` can fit naturally as another kernel module rather than a separate repo.
 
 # **1\. Objective**
 
@@ -66,7 +66,7 @@ Your Lightning adapter currently:
 
 * exposes framework, phase, step, epoch, model, trainer, log
 
-* exposes `optimizer`, `scheduler`, and optional `loss_state`
+* exposes `optimizer`, `scheduler`, and optional `mutable_state`
 
 * normalizes `loss` from outputs
 
@@ -192,7 +192,7 @@ src/hotcb/
    \_\_init\_\_.py  
    base.py  
    optimizer.py  
-   loss\_state.py  
+   mutable\_state.py  
  kernel.py
 
 # **6\. Adapter contract**
@@ -352,13 +352,13 @@ Patch examples:
 {"op": "wd\_mult", "value": 1.15}  
 {"op": "betas\_set", "value": \[0.9, 0.98\]}
 
-### **Loss-state actuator**
+### **Mutable-state actuator**
 
 File:
 
-* `actuators/loss_state.py`
+* `actuators/mutable_state.py`
 
-Assumes mutable `loss_state` dict-like structure.
+Assumes mutable `mutable_state` dict-like structure.
 
 Supports:
 
@@ -1013,7 +1013,7 @@ Lightning:
 
 * optimizer actuator wiring works
 
-* loss\_state actuator wiring works
+* mutable\_state actuator wiring works
 
 * val\_epoch\_end event emitted
 
@@ -1067,7 +1067,7 @@ Keep v1 intentionally tight.
 
 * optimizer actuator
 
-* loss-state actuator
+* mutable-state actuator
 
 * TPE proposal
 
@@ -1105,7 +1105,7 @@ Add:
 
 * `on_validation_epoch_end` support to emit `val_epoch_end`
 
-The rest is already close enough because `optimizer`, `scheduler`, and `loss_state` are already exposed.
+The rest is already close enough because `optimizer`, `scheduler`, and `mutable_state` are already exposed.
 
 ## **24.2 Kernel**
 

@@ -61,7 +61,7 @@ The kernel and training process communicate through the filesystem (JSONL files)
 
 ### Actuator system (`src/hotcb/actuators/`)
 
-Protocol-based (`BaseActuator`) — optimizer and loss_state actuators register with the kernel and are auto-propagated to the tune controller.
+Protocol-based (`BaseActuator`) — optimizer and mutable_state actuators register with the kernel and are auto-propagated to the tune controller.
 
 ### Server / Dashboard (`src/hotcb/server/`)
 
@@ -73,6 +73,10 @@ FastAPI app (`app.py`) served via `hotcb serve`. Architecture:
 - **`ai_prompts.py`**: `TrendCompressor`, `build_context()`, `parse_ai_response()`, `ACTION_SCHEMA` — prompt assembly and response parsing for AI autopilot
 - **`launcher.py`**: Training launch/stop/reset from the dashboard
 - Static frontend: `server/static/` — vanilla JS (charts.js, controls.js, panels.js, websocket.js, state.js, init.js)
+
+### Demos (`src/hotcb/demo.py`, `golden_demo.py`, `finetune_demo.py`)
+
+Synthetic training loops that use HotKernel + MetricsCollector + actuators — the same integration path as real projects. Demos use a lightweight `_OptProxy` (dict with `param_groups`) instead of a real torch optimizer. Recipe-driven changes are injected as commands to `hotcb.commands.jsonl` at scheduled steps (not freeze/replay mode), so interactive dashboard control works simultaneously.
 
 ### Launch API (`src/hotcb/launch.py`)
 
@@ -91,6 +95,12 @@ Top-level adapters (`lightning.py`, `hf.py`) wrap HotKernel for PyTorch Lightnin
 
 Synthetic benchmarks and CIFAR-10 autopilot evaluation. `tasks.py` defines tasks, `runner.py` runs them, `report.py` generates outputs, `eval_autopilot.py` compares baseline vs autopilot.
 
+## Multi-Agent Coordination
+
+`.claude/plans/STREAMS.md` is the shared roadmap for parallel Claude Code sessions.
+One file, all streams. Use `/stream` to browse, attach, create, or release streams.
+Claim a stream (`status → active`), update checkboxes + log as you work, release when done.
+
 ## Conventions
 
 - **Filesystem as IPC**: Training ↔ dashboard communication is via JSONL files, not sockets or shared memory.
@@ -100,3 +110,6 @@ Synthetic benchmarks and CIFAR-10 autopilot evaluation. `tasks.py` defines tasks
 - **Source layout**: `src/hotcb/` is the single package. All imports use `hotcb.*`.
 - **Autopilot modes**: `off`, `suggest`, `auto` (rule-based); `ai_suggest`, `ai_auto` (LLM-driven). Rules act as sensor layer for AI modes.
 - **AI autopilot uses OpenAI-compatible API**: configured via `HOTCB_AI_KEY` env var and `AIConfig`. Works with OpenAI, ollama, vLLM.
+
+
+Always use skills /python-runtime-patterns /python-project-setup /python-dev-practices when working with this project.

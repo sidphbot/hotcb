@@ -66,8 +66,28 @@
     <div class="tab-content active" data-tab="metrics">
       <div class="chart-toolbar">
         <div class="metric-toggles" id="metricToggles"></div>
+        <div class="step-range-controls" id="stepRangeControls">
+          <button class="btn btn-sm range-btn active" data-range="all">All</button>
+          <button class="btn btn-sm range-btn" data-range="last200">Last 200</button>
+          <button class="btn btn-sm range-btn" data-range="last500">Last 500</button>
+          <span class="range-custom-wrap">
+            <input type="number" class="range-input" id="rangeMin" placeholder="min" title="Start step">
+            <span class="range-sep">&ndash;</span>
+            <input type="number" class="range-input" id="rangeMax" placeholder="max" title="End step">
+            <button class="btn btn-sm range-btn" id="rangeApply" title="Apply custom range">Go</button>
+          </span>
+        </div>
       </div>
-      <div class="chart-wrap"><canvas id="metricsChart"></canvas></div>
+      <div class="chart-wrap" style="position:relative">
+        <canvas id="metricsChart"></canvas>
+        <div id="chartWaiting" class="chart-waiting">
+          <div class="chart-waiting-inner">
+            <div class="chart-waiting-pulse"></div>
+            <div class="chart-waiting-text">Waiting for metrics...</div>
+            <div class="chart-waiting-hint">Start training or connect to a running experiment</div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- TAB: Manifold (3D) -->
@@ -301,7 +321,10 @@
 
   <!-- Health Score -->
   <div class="card" id="healthCard">
-    <div class="card-header">Training Health</div>
+    <div class="card-header">
+      Training Health
+      <button class="health-toggle" id="healthToggle" title="Expand/collapse details" aria-label="Toggle health details">&#9660;</button>
+    </div>
     <div class="card-body" style="display:flex;align-items:center;gap:8px;">
       <span id="healthScore" style="font-size:22px;font-weight:700;font-family:var(--font-mono);color:var(--accent)">--</span>
       <div style="flex:1">
@@ -309,7 +332,9 @@
         <div style="font-size:9px;color:var(--text-muted);margin-top:2px" id="healthDesc">Evaluating...</div>
       </div>
     </div>
-    <div id="healthMetrics" style="margin-top:6px;font-size:9px;font-family:var(--font-mono);display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;"></div>
+    <div id="healthDetails" class="health-details" style="padding:0 10px 6px 10px;">
+      <div id="healthMetrics" style="font-size:9px;font-family:var(--font-mono);display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;"></div>
+    </div>
   </div>
 
   <!-- Chat (vibe-coder) -->
@@ -317,7 +342,7 @@
     <div class="card-header">Command Bar</div>
     <div class="chat-messages" id="chatMessages"></div>
     <div class="chat-input-row">
-      <input type="text" id="chatInput" placeholder='e.g. "learn faster", "reduce overfitting"'>
+      <input type="text" id="chatInput" placeholder='e.g. "learn faster", "reduce overfitting"' aria-label="Chat command input">
       <button class="btn btn-accent" id="btnChatSend">Send</button>
     </div>
   </div>
@@ -448,12 +473,12 @@
       <div style="font-size:9px;color:var(--text-muted);margin-top:3px;line-height:1.3" id="trainConfigDesc">Two-task training with recipe-driven loss weight shifts.</div>
       <div style="display:flex;gap:8px;margin-top:6px;align-items:center;font-size:10px;">
         <label style="color:var(--text-muted)">Steps</label>
-        <input type="number" id="trainMaxSteps" value="800" min="1" max="50000" style="width:60px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+        <input type="number" id="trainMaxSteps" value="800" min="1" max="50000" style="width:60px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;" aria-label="Max training steps">
         <label style="color:var(--text-muted)">Delay</label>
-        <input type="number" id="trainStepDelay" value="0.12" min="0.01" max="5" step="0.01" style="width:55px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+        <input type="number" id="trainStepDelay" value="0.12" min="0.01" max="5" step="0.01" style="width:55px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;" aria-label="Step delay in seconds">
         <span style="color:var(--text-muted)">s</span>
         <label style="color:var(--text-muted)">Seed</label>
-        <input type="number" id="trainSeed" placeholder="auto" min="0" max="2147483647" style="width:65px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;">
+        <input type="number" id="trainSeed" placeholder="auto" min="0" max="2147483647" style="width:65px;font-size:10px;padding:2px 4px;background:var(--bg-card);color:var(--text);border:1px solid var(--border);border-radius:3px;" aria-label="Random seed">
       </div>
       <div style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:10px;">
         <input type="checkbox" id="trainLoadRecipe" style="accent-color:var(--accent);width:12px;height:12px;">

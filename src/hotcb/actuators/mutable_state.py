@@ -6,11 +6,11 @@ from typing import Any, Dict, List, Optional
 from .base import ApplyResult, ValidationResult
 
 
-class LossStateActuator:
+class MutableStateActuator:
     """
-    Actuator for live loss-state mutations.
+    Actuator for live mutable-state mutations.
 
-    Supports: set, mult, delta on named scalar keys within loss_state["weights"].
+    Supports: set, mult, delta on named scalar keys within mutable_state["weights"].
     """
 
     name: str = "loss"
@@ -23,11 +23,11 @@ class LossStateActuator:
         self.global_bounds = global_bounds
         self.key_bounds: Dict[str, tuple[float, float]] = key_bounds or {}
 
-    def _resolve_loss_state(self, env: dict) -> Optional[dict]:
-        ls = env.get("loss_state")
-        if ls is not None:
-            return ls
-        resolver = env.get("resolve_loss_state")
+    def _resolve_mutable_state(self, env: dict) -> Optional[dict]:
+        mutable_state = env.get("mutable_state")
+        if mutable_state is not None:
+            return mutable_state
+        resolver = env.get("resolve_mutable_state")
         if callable(resolver):
             try:
                 return resolver()
@@ -39,10 +39,10 @@ class LossStateActuator:
         return self.key_bounds.get(key, self.global_bounds)
 
     def snapshot(self, env: dict) -> dict:
-        ls = self._resolve_loss_state(env)
-        if ls is None:
+        mutable_state = self._resolve_mutable_state(env)
+        if mutable_state is None:
             return {}
-        weights = ls.get("weights", {})
+        weights = mutable_state.get("weights", {})
         return {"weights": copy.deepcopy(weights)}
 
     def validate(self, patch: dict, env: dict) -> ValidationResult:
@@ -66,9 +66,9 @@ class LossStateActuator:
         if errors:
             return ValidationResult(valid=False, errors=errors)
 
-        ls = self._resolve_loss_state(env)
-        if ls is not None:
-            weights = ls.get("weights", {})
+        mutable_state = self._resolve_mutable_state(env)
+        if mutable_state is not None:
+            weights = mutable_state.get("weights", {})
             bounds = self._get_bounds(key)
             if op == "set":
                 if not (bounds[0] <= value <= bounds[1]):
@@ -89,14 +89,14 @@ class LossStateActuator:
         return ValidationResult(valid=len(errors) == 0, errors=errors)
 
     def apply(self, patch: dict, env: dict) -> ApplyResult:
-        ls = self._resolve_loss_state(env)
-        if ls is None:
-            return ApplyResult(success=False, error="missing_loss_state")
+        mutable_state = self._resolve_mutable_state(env)
+        if mutable_state is None:
+            return ApplyResult(success=False, error="missing_mutable_state")
 
         op = patch.get("op")
         key = patch.get("key")
         value = patch.get("value")
-        weights = ls.setdefault("weights", {})
+        weights = mutable_state.setdefault("weights", {})
         bounds = self._get_bounds(key)
 
         try:
@@ -117,13 +117,13 @@ class LossStateActuator:
             return ApplyResult(success=False, error=str(e))
 
     def restore(self, snapshot: dict, env: dict) -> ApplyResult:
-        ls = self._resolve_loss_state(env)
-        if ls is None:
-            return ApplyResult(success=False, error="missing_loss_state")
+        mutable_state = self._resolve_mutable_state(env)
+        if mutable_state is None:
+            return ApplyResult(success=False, error="missing_mutable_state")
 
         saved_weights = snapshot.get("weights", {})
         try:
-            ls["weights"] = copy.deepcopy(saved_weights)
+            mutable_state["weights"] = copy.deepcopy(saved_weights)
             return ApplyResult(success=True)
         except Exception as e:
             return ApplyResult(success=False, error=str(e))

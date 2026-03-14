@@ -45,7 +45,8 @@ class ForecastResult:
     method: str  # "xgboost" or "fallback_linear"
 
     def to_dict(self) -> dict:
-        return {
+        from ..util import sanitize_floats
+        return sanitize_floats({
             "steps": self.steps,
             "values": self.values,
             "forecast": self.values,  # alias for dashboard JS
@@ -53,7 +54,7 @@ class ForecastResult:
             "upper": self.upper,
             "metric_name": self.metric_name,
             "method": self.method,
-        }
+        })
 
 
 # ---------------------------------------------------------------------------

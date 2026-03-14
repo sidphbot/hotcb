@@ -2,6 +2,14 @@
  * hotcb dashboard — initialization and data loading
  */
 
+function dismissChartWaiting() {
+  var el = document.getElementById('chartWaiting');
+  if (el && !el.classList.contains('hidden')) {
+    el.classList.add('hidden');
+    setTimeout(function() { el.style.display = 'none'; }, 500);
+  }
+}
+
 async function initialLoad() {
   // Status
   var status = await api('GET', '/api/status');
@@ -13,6 +21,7 @@ async function initialLoad() {
   // Metric history
   var hist = await api('GET', '/api/metrics/history?last_n=2000');
   if (hist && hist.records && hist.records.length > 0) {
+    dismissChartWaiting();
     hist.records.forEach(function(rec) {
       var step = rec.step || 0;
       var metrics = rec.metrics || {};
@@ -124,7 +133,7 @@ async function initialLoad() {
 
   // Periodic updates
   startForecastPolling();
-  setInterval(fetchAlerts, 15000);
+  S._alertInterval = setInterval(fetchAlerts, 15000);
 
   // Show tour for first-time users (with delay to let UI settle)
   if (shouldShowTour()) {
@@ -144,6 +153,18 @@ async function initialLoad() {
 
   initTabs();
   initControls();
+  // Health card collapse toggle
+  var healthToggle = document.getElementById('healthToggle');
+  var healthDetails = document.getElementById('healthDetails');
+  if (healthToggle && healthDetails) {
+    // Start collapsed
+    healthDetails.classList.add('collapsed');
+    healthToggle.classList.add('collapsed');
+    healthToggle.addEventListener('click', function() {
+      healthDetails.classList.toggle('collapsed');
+      healthToggle.classList.toggle('collapsed');
+    });
+  }
   $('#btnTour').addEventListener('click', startTour);
   initRecipeEditor();
   initAutopilotRulesEditor();
@@ -155,6 +176,7 @@ async function initialLoad() {
   initConfigWizard();
   initCompare();
   createMetricsChart();
+  initStepRangeControls();
   initialLoad();
   connectWS();
 
@@ -189,6 +211,6 @@ async function initialLoad() {
   }
 
   // Persist UI state periodically and before page unload
-  setInterval(saveUIState, 5000);
+  S._saveStateInterval = setInterval(saveUIState, 5000);
   window.addEventListener('beforeunload', saveUIState);
 })();

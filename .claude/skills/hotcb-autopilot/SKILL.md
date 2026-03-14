@@ -76,8 +76,11 @@ When `hotcb.training_context.md` exists:
 ### 1.1 Check hotcb installation
 
 ```bash
-python3 -c "import hotcb; print('hotcb OK')" 2>&1 && python3 -c "import fastapi, uvicorn, websockets; print('dashboard deps OK')" 2>&1
+python3 -c "import hotcb; print('hotcb OK')" 2>&1 || PYTHONPATH=src python3 -c "import hotcb; print('hotcb OK (dev mode)')" 2>&1
+python3 -c "import fastapi, uvicorn, websockets; print('dashboard deps OK')" 2>&1
 ```
+
+If the import only works with `PYTHONPATH=src`, prefix all subsequent `python3` and `hotcb` commands with `PYTHONPATH=src`.
 
 If not installed: tell user to run `pip install "hotcb[dashboard]"` (or `pip install -e ".[dev,all]"` if developing from source).
 
@@ -311,6 +314,23 @@ Format:
 - **After intervention**: Check in 20 steps to see effect
 - **If diverging**: Check every 10 steps
 - **If healthy and improving**: Can extend to every 100 steps
+
+**Wall-clock cap**: Regardless of step-based cadence, NEVER wait more than 60 seconds between checks. If training is slow (e.g., 1 step/sec), the step-based cadence may translate to minutes of silence. Always set a wall-clock timeout:
+
+```bash
+# Example: wait for step-based cadence OR 60s, whichever comes first
+NEXT_CHECK_STEP=<current_step + cadence>
+TIMEOUT=60
+START=$(date +%s)
+while true; do
+  LATEST=$(curl -s http://localhost:8421/api/metrics/history?last_n=1 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['records'][-1]['step'] if d.get('records') else 0)" 2>/dev/null || echo 0)
+  ELAPSED=$(( $(date +%s) - START ))
+  if [ "$LATEST" -ge "$NEXT_CHECK_STEP" ] || [ "$ELAPSED" -ge "$TIMEOUT" ]; then break; fi
+  sleep 3
+done
+```
+
+This ensures responsiveness even with slow training loops.
 
 ### 3.7 Graduation principle
 

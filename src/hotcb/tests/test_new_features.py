@@ -187,13 +187,13 @@ class TestTracebackInModuleResult:
     def test_loss_set_params_failure_has_traceback(self):
         """HotLossController.set_params failure produces a result with traceback."""
         ctrl = HotLossController()
-        # Give a loss_state where _apply_params will raise due to non-dict value
-        # We force an error by patching the loss_state to raise on setdefault
-        class BadLossState(dict):
+        # Give a mutable_state where _apply_params will raise due to non-dict value
+        # We force an error by patching the mutable_state to raise on setdefault
+        class BadMutableState(dict):
             def setdefault(self, key, default=None):
                 raise TypeError("intentional error for test")
 
-        env = {"loss_state": BadLossState()}
+        env = {"mutable_state": BadMutableState()}
         op = HotOp(module="loss", op="set_params", params={"kl_w": 0.5})
         result = ctrl.apply_op(op, env)
         assert result.decision == "failed"
@@ -226,7 +226,7 @@ class TestTracebackInModuleResult:
     ):
         """When loss set_params fails through the kernel, ledger entry has traceback."""
 
-        class BadLossState(dict):
+        class BadMutableState(dict):
             def setdefault(self, key, default=None):
                 raise TypeError("intentional error for test")
 
@@ -236,7 +236,7 @@ class TestTracebackInModuleResult:
             "params": {"kl_w": 0.5},
         })
         kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
-        env = make_env(step=1, loss_state=BadLossState())
+        env = make_env(step=1, mutable_state=BadMutableState())
         kernel.apply(env, ["train_step_end"])
 
         ledger = read_ledger()

@@ -71,9 +71,16 @@ function render3DPoints(ctx, points, interventionSteps) {
   if (!ctx) return;
   var scene = ctx.scene;
 
-  // Remove old data points
+  // Remove old data points and dispose GPU resources
   var old = scene.children.filter(function(c) { return c.userData && c.userData.isDataPoint; });
-  old.forEach(function(o) { scene.remove(o); });
+  old.forEach(function(o) {
+    scene.remove(o);
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      if (o.material.map) o.material.map.dispose();
+      o.material.dispose();
+    }
+  });
 
   if (!points || points.length === 0) return;
 

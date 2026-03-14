@@ -194,12 +194,13 @@ class MetricsCollector:
 
     def _persist(self, snap: MetricSnapshot) -> None:
         """Append snapshot to JSONL file."""
-        record = {
+        from ..util import sanitize_floats
+        record = sanitize_floats({
             "step": snap.step,
             "epoch": snap.epoch,
             "wall_time": snap.wall_time,
             "metrics": snap.metrics,
-        }
+        })
         try:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -208,21 +209,27 @@ class MetricsCollector:
 
     @staticmethod
     def _to_float(v: Any) -> Optional[float]:
-        """Best-effort conversion to float."""
+        """Best-effort conversion to float. Returns None for NaN/inf."""
+        import math
         if v is None:
             return None
+        result: Optional[float] = None
         if isinstance(v, (int, float)):
-            return float(v)
-        # torch.Tensor
-        if hasattr(v, "item"):
+            result = float(v)
+        elif hasattr(v, "item"):
+            # torch.Tensor
             try:
-                return float(v.item())
+                result = float(v.item())
             except Exception:
                 pass
-        try:
-            return float(v)
-        except (TypeError, ValueError):
+        else:
+            try:
+                result = float(v)
+            except (TypeError, ValueError):
+                return None
+        if result is not None and (math.isnan(result) or math.isinf(result)):
             return None
+        return result
 
     @staticmethod
     def _well_known_names() -> Set[str]:

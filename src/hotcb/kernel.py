@@ -337,6 +337,7 @@ class HotKernel:
             "id": op.id,
             "source": op.source,
             "decision": decision,
+            "params": op.params,
             "payload": payload,
             "error": error,
             "traceback": traceback_str,

@@ -139,7 +139,7 @@ for step, batch in enumerate(dl):
             "phase": "train",
             "step": step,
             "optimizer": optimizer,
-            "loss_state": model.loss_state,
+            "mutable_state": model.mutable_state,
             "log": print,
         },
         events=["train_step_end"],
@@ -302,14 +302,14 @@ Pass `env["optimizer"]` (or `env["resolve_optimizer"]` as a callable). The Light
 Keep a mutable dict on your model:
 
 ```python
-self.loss_state = {
+self.mutable_state = {
     "weights": {"distill": 0.2, "depth": 1.5},
     "terms":   {"aux_depth": True, "aux_heatmap": False},
     "ramps":   {"depth": {"type": "linear", "warmup_frac": 0.2, "end": 2.0}},
 }
 ```
 
-Set `env["loss_state"] = self.loss_state` — the adapters do this automatically if the attribute exists on your LightningModule or HF model.
+Set `env["mutable_state"] = self.mutable_state` — the adapters do this automatically if the attribute exists on your LightningModule or HF model.
 
 ---
 

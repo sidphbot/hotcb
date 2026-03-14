@@ -310,7 +310,8 @@ You MUST respond with valid JSON:
 ## Guidelines
 - Prefer "noop" when metrics are trending well. Don't fix what isn't broken.
 - Make small adjustments first (e.g., reduce lr by 0.5x, not 0.1x).
-- After making a change, set next_check to wait enough steps to observe the effect (typically 20-50 steps).
+- After making a change, set next_check to wait 20-50 steps to observe the effect. NEVER set next_check more than 200 steps ahead — training runs are often short.
+- Use "in_n_steps" mode with n between 20 and 100. Do NOT use large values.
 - If you see divergence (loss spike), reduce lr aggressively.
 - If you see plateau, try reducing lr by 0.5x or adjusting loss weights.
 - Only declare_rerun if training is truly degenerate (loss diverged, NaN, etc.).
@@ -497,8 +498,8 @@ def build_context(
         ga = capabilities.get("grad_accumulation_steps", 1)
         if ga > 1:
             cap_lines.append(f"- **Grad accumulation**: {ga} steps")
-        if capabilities.get("loss_state_detected"):
-            ls_keys = capabilities.get("loss_state_keys", [])
+        if capabilities.get("mutable_state_detected"):
+            ls_keys = capabilities.get("mutable_state_keys", [])
             cap_lines.append(f"- **Loss terms**: {', '.join(ls_keys)}")
         clip = capabilities.get("grad_clip_value")
         if clip is not None:

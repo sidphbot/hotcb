@@ -92,16 +92,32 @@ function addTimelineItem(rec) {
   var step = rec.step || '?';
   var mod = rec.module || '?';
   var desc = rec.op || '';
-  var params = rec.params ? JSON.stringify(rec.params) : '';
   var decision = rec.decision || rec.status || 'applied';
   var source = rec.source || 'interactive';
   var sourceColor = source === 'recipe' ? 'var(--yellow, #facc15)' :
                     source === 'autopilot' ? 'var(--cyan, #22d3ee)' :
                     'var(--text-muted)';
+  // Build param capsules instead of raw JSON
+  var paramCapsules = '';
+  var paramSrc = (rec.params && typeof rec.params === 'object') ? rec.params :
+                 (rec.payload && typeof rec.payload === 'object') ? rec.payload : null;
+  if (paramSrc) {
+    var keys = Object.keys(paramSrc);
+    keys.forEach(function(k) {
+      var v = paramSrc[k];
+      if (typeof v === 'number') {
+        v = v < 0.01 || v > 1e4 ? v.toExponential(1) : parseFloat(v.toPrecision(3));
+      } else if (typeof v === 'object' && v !== null) {
+        v = JSON.stringify(v);
+      }
+      paramCapsules += '<span class="tl-capsule">' + k + '<span class="tl-capsule-val">' + v + '</span></span>';
+    });
+  }
   div.innerHTML =
     '<span class="tl-step">step ' + step + '</span>' +
     '<span class="tl-module ' + mod + '">' + mod + '</span>' +
-    '<span style="color:var(--text-secondary)">' + desc + ' ' + params + '</span>' +
+    '<span style="color:var(--text-secondary)">' + desc + '</span>' +
+    '<span class="tl-capsules">' + paramCapsules + '</span>' +
     '<span class="tl-decision ' + decision + '">' + decision + '</span>' +
     '<span style="color:' + sourceColor + ';font-size:9px;margin-left:4px;text-transform:uppercase;font-weight:600">' + source + '</span>';
 
@@ -118,6 +134,8 @@ function addTimelineItem(rec) {
       div.classList.remove('tl-active');
       var existing = document.getElementById('impactSummary');
       if (existing) existing.remove();
+      // Restore user's chosen range instead of staying locked
+      _applyChartStepRange();
       if (S.chartInstance) S.chartInstance.update('none');
       return;
     }
@@ -166,10 +184,42 @@ function _stopRecipeAutoRefresh() {
 function renderRecipe() {
   var list = $('#recipeList');
   list.innerHTML = '';
-  if (S.recipeEntries.length === 0) {
+
+  // Show applied mutations from current run
+  if (S.appliedData && S.appliedData.length > 0) {
+    var appliedHeader = document.createElement('div');
+    appliedHeader.style.cssText = 'font-size:9px;font-weight:700;text-transform:uppercase;color:var(--text-muted);padding:6px 4px 4px;letter-spacing:0.5px;border-bottom:1px solid var(--border);margin-bottom:4px;';
+    appliedHeader.textContent = 'Applied This Run (' + S.appliedData.length + ')';
+    list.appendChild(appliedHeader);
+    S.appliedData.forEach(function(rec) {
+      var div = document.createElement('div');
+      div.style.cssText = 'display:grid;grid-template-columns:60px 44px 1fr;gap:4px;align-items:center;padding:3px 4px;font-size:9px;font-family:var(--font-mono);color:var(--text-muted);opacity:0.7;';
+      var capsules = '';
+      if (rec.params && typeof rec.params === 'object') {
+        Object.keys(rec.params).forEach(function(k) {
+          var v = rec.params[k];
+          if (typeof v === 'number') v = v < 0.01 || v > 1e4 ? v.toExponential(1) : parseFloat(v.toPrecision(3));
+          capsules += '<span class="tl-capsule">' + k + '<span class="tl-capsule-val">' + v + '</span></span>';
+        });
+      }
+      div.innerHTML = '<span>step ' + (rec.step || '?') + '</span>' +
+        '<span class="tl-module ' + (rec.module || '') + '">' + (rec.module || '?') + '</span>' +
+        '<span style="display:flex;flex-wrap:wrap;gap:2px">' + (rec.op || '') + ' ' + capsules + '</span>';
+      list.appendChild(div);
+    });
+  }
+
+  if (S.recipeEntries.length === 0 && (!S.appliedData || S.appliedData.length === 0)) {
     list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px">No recipe entries. Click + Add to create one, or use Schedule from Controls.</div>';
     return;
   }
+  if (S.recipeEntries.length === 0) return;
+
+  // Recipe section header
+  var recipeHeader = document.createElement('div');
+  recipeHeader.style.cssText = 'font-size:9px;font-weight:700;text-transform:uppercase;color:var(--accent);padding:8px 4px 4px;letter-spacing:0.5px;border-bottom:1px solid var(--border);margin-bottom:4px;';
+  recipeHeader.textContent = 'Scheduled Recipe (' + S.recipeEntries.length + ')';
+  list.appendChild(recipeHeader);
   S.recipeEntries.forEach(function(entry, idx) {
     var step = entry.at_step !== undefined ? entry.at_step : (entry.at ? entry.at.step : (entry.step || '?'));
     var mod = entry.module || '?';
@@ -889,7 +939,7 @@ function initCompare() {
 }
 
 async function fetchCompareRuns() {
-    var data = await api('GET', '/api/train/runs/history');
+    var data = await api('GET', '/api/runs/discover');
     if (!data || !data.runs) return;
 
     // Store run metadata
@@ -901,7 +951,7 @@ async function fetchCompareRuns() {
     list.innerHTML = '';
 
     if (data.runs.length === 0) {
-        list.innerHTML = '<div style="color:var(--text-muted);font-size:10px;padding:8px">No completed runs yet. Start and complete a training run first.</div>';
+        list.innerHTML = '<div style="color:var(--text-muted);font-size:10px;padding:8px">No runs found. Start training or point at a directory with run subdirs.</div>';
         return;
     }
 
@@ -914,15 +964,13 @@ async function fetchCompareRuns() {
             'background:' + (isSelected ? color + '11' : 'transparent') + ';transition:all 0.15s;';
 
         var dot = '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';flex-shrink:0;display:inline-block"></span>';
-        var configLabel = run.config_name || run.config_id || '?';
-        var runId = run.run_id || '?';
-        var finalLoss = run.final_metrics && run.final_metrics.train_loss
-            ? run.final_metrics.train_loss.toFixed(4) : '--';
+        var configLabel = run.label || run.run_id || '?';
+        var stepInfo = run.step_count ? run.step_count + ' steps' : '--';
 
         div.innerHTML = dot +
             '<div style="flex:1;overflow:hidden">' +
             '<div style="font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + configLabel + '</div>' +
-            '<div style="color:var(--text-muted);font-size:9px">' + runId + ' · loss: ' + finalLoss + '</div>' +
+            '<div style="color:var(--text-muted);font-size:9px">' + run.run_id + ' · ' + stepInfo + '</div>' +
             '</div>';
 
         div.addEventListener('click', function() {
@@ -1069,12 +1117,12 @@ function _rebuildCompareChart() {
     // Mutation annotation plugin for compare chart
     var compareAnnotations = [];
 
-    // Build metric-level dash patterns: first metric solid, rest dashed variants
-    var metricDashPatterns = [[], [6, 3], [2, 2], [8, 4, 2, 4], [4, 2], [10, 3]];
+    // Color by metric name (consistent across runs), dash pattern by run/experiment
+    var runDashPatterns = [[], [6, 3], [3, 3], [8, 3, 2, 3], [4, 2], [10, 3]];
 
     runIds.forEach(function(runId, runIdx) {
         var records = _compareAllData[runId] || [];
-        var color = _getCompareRunColor(runId);
+        var dashPattern = runDashPatterns[runIdx % runDashPatterns.length];
 
         enabledMetrics.forEach(function(metricName, metricIdx) {
             var points = [];
@@ -1086,15 +1134,17 @@ function _rebuildCompareChart() {
             });
             if (points.length === 0) return;
 
-            // All metrics for the same run share the same color, differentiated by dash pattern
-            var dashPattern = metricDashPatterns[metricIdx % metricDashPatterns.length];
+            // Color by metric name for consistency across runs
+            var color = typeof getColor === 'function' ? getColor(metricName) : _getCompareRunColor(runId);
+            var meta = _compareRunMeta[runId] || {};
+            var runLabel = (meta.label || meta.config_name || runId).substring(0, 12);
 
             datasets.push({
-                label: runId.substring(0, 8) + ' · ' + metricName,
+                label: runLabel + ' · ' + metricName,
                 data: points,
                 borderColor: color,
                 backgroundColor: 'transparent',
-                tension: 0.3,
+                tension: 0.15,
                 pointRadius: 0,
                 borderWidth: 2,
                 borderDash: dashPattern,
@@ -1136,6 +1186,7 @@ function _rebuildCompareChart() {
                 tooltip: {
                     backgroundColor:'#121c2b', borderColor:'#2a4060', borderWidth:1,
                     titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:10},
+                    usePointStyle: true, boxWidth: 8, boxHeight: 8,
                     callbacks: {
                         label: function(ctx) {
                             var raw = ctx.raw;
@@ -1165,7 +1216,7 @@ function _rebuildCompareChart() {
                     }
                 },
             },
-            elements: { point: {radius:0, hoverRadius:3}, line: {tension:0.3} },
+            elements: { point: {radius:0, hoverRadius:3}, line: {tension:0.15} },
         },
     });
 
@@ -1360,6 +1411,165 @@ async function updateCompareChart() {
 
     _updateCompareMetricToggles();
     _rebuildCompareChart();
+}
+
+/* ================================================================ */
+/* End-of-run summary                                                */
+/* ================================================================ */
+
+function showRunSummary(configName) {
+  // Gather metric data
+  var metricNames = Object.keys(S.metricsData);
+  if (metricNames.length === 0) return;  // no data, nothing to show
+
+  // Build per-metric start/end/delta
+  var rows = [];
+  var maxStep = 0;
+  metricNames.forEach(function(name) {
+    var series = S.metricsData[name];
+    if (!series || series.length === 0) return;
+    var first = series[0];
+    var last = series[series.length - 1];
+    if (last.step > maxStep) maxStep = last.step;
+    var delta = last.value - first.value;
+    var pctChange = first.value !== 0 ? (delta / Math.abs(first.value)) * 100 : 0;
+    rows.push({
+      name: name,
+      start: first.value,
+      end: last.value,
+      delta: delta,
+      pctChange: pctChange,
+      direction: delta < -0.001 ? 'down' : delta > 0.001 ? 'up' : 'flat'
+    });
+  });
+
+  // Sort by absolute delta (largest change first)
+  rows.sort(function(a, b) { return Math.abs(b.delta) - Math.abs(a.delta); });
+
+  // Count mutations
+  var mutationCount = S.appliedData ? S.appliedData.length : 0;
+
+  // Find most impactful mutation
+  var bestMove = _findBestMutation();
+
+  // Build modal HTML
+  var overlay = document.createElement('div');
+  overlay.className = 'run-summary-overlay';
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  var panel = document.createElement('div');
+  panel.className = 'run-summary-panel';
+
+  var title = configName || 'Training';
+  panel.innerHTML = '<h3>Run Complete — ' + _esc(title) + '</h3>' +
+    '<div class="summary-meta">' + maxStep + ' steps &middot; ' +
+    metricNames.length + ' metrics &middot; ' + mutationCount + ' mutations applied</div>';
+
+  // Metrics table
+  var table = '<table><thead><tr><th>Metric</th><th>Start</th><th>End</th><th>Change</th><th></th></tr></thead><tbody>';
+  var showCount = Math.min(rows.length, 12);
+  for (var i = 0; i < showCount; i++) {
+    var r = rows[i];
+    var cls = r.direction === 'down' ? 'negative' : r.direction === 'up' ? 'positive' : 'neutral';
+    var arrow = r.direction === 'down' ? '&#9660;' : r.direction === 'up' ? '&#9650;' : '&#9644;';
+    var sign = r.delta > 0 ? '+' : '';
+    table += '<tr><td>' + _esc(r.name) + '</td>' +
+      '<td>' + _fmtNum(r.start) + '</td>' +
+      '<td>' + _fmtNum(r.end) + '</td>' +
+      '<td class="' + cls + '">' + sign + _fmtNum(r.delta) + ' (' + sign + r.pctChange.toFixed(1) + '%)</td>' +
+      '<td class="' + cls + '">' + arrow + '</td></tr>';
+  }
+  if (rows.length > showCount) {
+    table += '<tr><td colspan="5" style="color:var(--text-muted);font-style:italic">' +
+      (rows.length - showCount) + ' more metrics...</td></tr>';
+  }
+  table += '</tbody></table>';
+  panel.innerHTML += table;
+
+  // Best move highlight
+  if (bestMove) {
+    panel.innerHTML += '<div class="best-move"><strong>Best move:</strong> ' +
+      _esc(bestMove.desc) + '</div>';
+  }
+
+  // Action buttons
+  panel.innerHTML += '<div class="summary-actions">' +
+    '<button class="btn btn-sm" id="summaryBtnCompare">Compare</button>' +
+    '<button class="btn btn-sm btn-accent" id="summaryBtnClose">Close</button>' +
+    '</div>';
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  // Wire button events
+  var btnClose = document.getElementById('summaryBtnClose');
+  if (btnClose) btnClose.addEventListener('click', function() { overlay.remove(); });
+  var btnCompare = document.getElementById('summaryBtnCompare');
+  if (btnCompare) btnCompare.addEventListener('click', function() {
+    overlay.remove();
+    // Switch to Compare tab
+    var tab = document.querySelector('.tab[data-tab="compare"]');
+    if (tab) tab.click();
+  });
+}
+
+function _findBestMutation() {
+  if (!S.appliedData || S.appliedData.length === 0) return null;
+
+  var best = null;
+  var bestImpact = 0;
+
+  S.appliedData.forEach(function(mut) {
+    var step = mut.step;
+    if (!step) return;
+
+    // Look at metric deltas in the 20 steps after this mutation
+    var metricNames = Object.keys(S.metricsData);
+    metricNames.forEach(function(name) {
+      var series = S.metricsData[name];
+      if (!series || series.length < 3) return;
+
+      // Find metric value at mutation step and 20 steps after
+      var atMut = null, afterMut = null;
+      for (var i = 0; i < series.length; i++) {
+        if (series[i].step >= step && atMut === null) atMut = series[i].value;
+        if (series[i].step >= step + 20 && afterMut === null) {
+          afterMut = series[i].value;
+          break;
+        }
+      }
+      if (atMut !== null && afterMut !== null) {
+        var impact = Math.abs(afterMut - atMut);
+        if (impact > bestImpact) {
+          bestImpact = impact;
+          var pct = atMut !== 0 ? ((afterMut - atMut) / Math.abs(atMut) * 100).toFixed(1) : '?';
+          var dir = afterMut < atMut ? 'dropped' : 'increased';
+          var desc = (mut.module || '?') + '.' + (mut.op || '?');
+          if (mut.params) {
+            var keys = Object.keys(mut.params);
+            if (keys.length > 0) desc += ' (' + keys.map(function(k) { return k + '=' + mut.params[k]; }).join(', ') + ')';
+          }
+          best = { desc: desc + ' at step ' + step + ' → ' + name + ' ' + dir + ' ' + pct + '%' };
+        }
+      }
+    });
+  });
+
+  return best;
+}
+
+function _fmtNum(v) {
+  if (Math.abs(v) < 0.001 && v !== 0) return v.toExponential(2);
+  if (Math.abs(v) >= 1000) return v.toFixed(1);
+  return v.toPrecision(4);
+}
+
+function _esc(s) {
+  var d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
 }
 
 /* ================================================================ */

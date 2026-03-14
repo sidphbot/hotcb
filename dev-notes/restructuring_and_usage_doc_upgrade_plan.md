@@ -240,10 +240,10 @@ for step, batch in enumerate(dl):
    loss.backward()  
    opt.step()
 
-   env \= {"framework":"torch", "phase":"train", "step":step, "optimizer":opt, "loss\_state":loss\_state}  
+   env \= {"framework":"torch", "phase":"train", "step":step, "optimizer":opt, "mutable\_state":mutable\_state}  
    kernel.apply(env, events=\["train\_step\_end"\])
 
-(README shouldn’t be perfect API-wise, but should show where optimizer/loss\_state go.)
+(README shouldn’t be perfect API-wise, but should show where optimizer/mutable\_state go.)
 
 ---
 
@@ -514,13 +514,13 @@ The general rule:
 
 * **hotopt** needs access to the optimizer (and optionally scheduler)
 
-* **hotloss** needs access to a mutable loss configuration object (“loss\_state”) that your loss computation reads each step
+* **hotloss** needs access to a mutable loss configuration object (“mutable\_state”) that your loss computation reads each step
 
 You can provide these in one of two ways:
 
-1. directly on `env` (`env["optimizer"]`, `env["loss_state"]`), or
+1. directly on `env` (`env["optimizer"]`, `env["mutable_state"]`), or
 
-2. via resolver functions (`env["resolve_optimizer"]`, `env["resolve_loss_state"]`) when direct access is awkward.
+2. via resolver functions (`env["resolve_optimizer"]`, `env["resolve_mutable_state"]`) when direct access is awkward.
 
 ### **1\) PyTorch Lightning**
 
@@ -552,17 +552,17 @@ The easiest, most reliable pattern is to store your loss weights/flags in a **mu
 
 Example convention:
 
-* `self.loss_state = {"weights": {...}, "terms": {...}, "ramps": {...}}`
+* `self.mutable_state = {"weights": {...}, "terms": {...}, "ramps": {...}}`
 
-* Your `training_step` (or loss function) reads from `self.loss_state`
+* Your `training_step` (or loss function) reads from `self.mutable_state`
 
 Then the adapter sets:
 
-* `env["loss_state"] = pl_module.loss_state`
+* `env["mutable_state"] = pl_module.mutable_state`
 
 This ensures hotloss updates take effect immediately on the next step, without any trainer patching.
 
-**Tip:** Prefer a single authoritative loss\_state dict that your loss code reads every step. Avoid copying it into local variables that never refresh.
+**Tip:** Prefer a single authoritative mutable\_state dict that your loss code reads every step. Avoid copying it into local variables that never refresh.
 
 ---
 
@@ -590,20 +590,20 @@ HF’s Trainer loss is commonly computed inside the model’s `forward()` or ins
 
 Recommended approach:
 
-* Keep a mutable `loss_state` on the model instance, and have `compute_loss` / forward read from it.
+* Keep a mutable `mutable_state` on the model instance, and have `compute_loss` / forward read from it.
 
 Example:
 
-* `model.loss_state = {...}`
+* `model.mutable_state = {...}`
 
-* In `compute_loss`, use `model.loss_state["weights"]["distill"]` etc.
+* In `compute_loss`, use `model.mutable_state["weights"]["distill"]` etc.
 
 Then the adapter sets:
 
-* `env["loss_state"] = model.loss_state`  
+* `env["mutable_state"] = model.mutable_state`  
    or provides:
 
-* `env["resolve_loss_state"] = lambda: model.loss_state`
+* `env["resolve_mutable_state"] = lambda: model.mutable_state`
 
 This is the cleanest cross-version approach because it doesn’t require patching Trainer internals.
 
@@ -633,23 +633,23 @@ If you have multiple optimizers:
 
 Use a mutable dict and read it inside your loss computation each step:
 
-* `loss_state = {"weights": {...}, "terms": {...}, "ramps": {...}}`
+* `mutable_state = {"weights": {...}, "terms": {...}, "ramps": {...}}`
 
-* Compute loss using values from `loss_state`
+* Compute loss using values from `mutable_state`
 
 Then at safe point:
 
-* `env["loss_state"] = loss_state`
+* `env["mutable_state"] = mutable_state`
 
 This gives you fully deterministic, step-indexed changes that can be exported to a recipe and replayed later.
 
 ---
 
-### **Recommended `loss_state` structure (portable across frameworks)**
+### **Recommended `mutable_state` structure (portable across frameworks)**
 
 To keep configs consistent across Lightning/HF/bare torch, HotOps recommends a single shape:
 
-loss\_state \= {  
+mutable\_state \= {  
  "weights": {  
    "distill": 0.2,  
    "depth": 1.5,  
@@ -680,13 +680,13 @@ hotcb loss set ramps.depth.warmup\_frac=0.2 ramps.depth.end=2.0
 
 This is what keeps HotOps safe, debuggable, and replayable.
 
-## **Concrete snippets: exposing optimizer \+ loss\_state per framework**
+## **Concrete snippets: exposing optimizer \+ mutable\_state per framework**
 
 ### **1\) PyTorch Lightning**
 
-**Pattern:** store a mutable `loss_state` on your `LightningModule`, and let the HotOps Lightning adapter pull the optimizer from `trainer.optimizers`.
+**Pattern:** store a mutable `mutable_state` on your `LightningModule`, and let the HotOps Lightning adapter pull the optimizer from `trainer.optimizers`.
 
-#### **LightningModule with `loss_state`**
+#### **LightningModule with `mutable_state`**
 
 import pytorch\_lightning as pl  
 import torch  
@@ -698,7 +698,7 @@ class MyModel(pl.LightningModule):
        self.net \= torch.nn.Linear(10, 1\)
 
        \# Mutable, runtime-updatable loss config (hotloss mutates this).  
-       self.loss\_state \= {  
+       self.mutable\_state \= {  
            "weights": {"main": 1.0, "aux": 0.2},  
            "terms": {"aux": True},  
            "ramps": {},  \# optional  
@@ -712,12 +712,12 @@ class MyModel(pl.LightningModule):
        pred \= self(x)  
        main \= F.mse\_loss(pred, y)
 
-       w\_main \= float(self.loss\_state\["weights"\].get("main", 1.0))  
+       w\_main \= float(self.mutable\_state\["weights"\].get("main", 1.0))  
        loss \= w\_main \* main
 
-       if self.loss\_state\["terms"\].get("aux", False):  
+       if self.mutable\_state\["terms"\].get("aux", False):  
            aux \= (pred.abs().mean())  
-           w\_aux \= float(self.loss\_state\["weights"\].get("aux", 0.0))  
+           w\_aux \= float(self.mutable\_state\["weights"\].get("aux", 0.0))  
            loss \= loss \+ w\_aux \* aux
 
        self.log("train\_loss", loss)  
@@ -729,7 +729,7 @@ class MyModel(pl.LightningModule):
 
 #### **HotOps Lightning adapter (minimal)**
 
-This is the key: add optimizer \+ loss\_state to `env` before calling `kernel.apply`.
+This is the key: add optimizer \+ mutable\_state to `env` before calling `kernel.apply`.
 
 import pytorch\_lightning as pl  
 from typing import Any, Dict, Optional, List
@@ -765,7 +765,7 @@ class HotOpsCallback(pl.Callback):
            scheduler \= None
 
        \# Loss exposure (hotloss)  
-       loss\_state \= getattr(pl\_module, "loss\_state", None)
+       mutable\_state \= getattr(pl\_module, "mutable\_state", None)
 
        env: Dict\[str, Any\] \= {  
            "framework": "lightning",  
@@ -779,7 +779,7 @@ class HotOpsCallback(pl.Callback):
            "batch\_idx": batch\_idx,  
            "optimizer": optimizer,  
            "scheduler": scheduler,  
-           "loss\_state": loss\_state,  
+           "mutable\_state": mutable\_state,  
            "log": lambda s: trainer.print(s),  
        }
 
@@ -799,9 +799,9 @@ hotops \--dir runs/exp1 loss set weights.main=1.0 weights.aux=0.1 terms.aux=fals
 
 ### **2\) HuggingFace `transformers.Trainer`**
 
-**Pattern:** put a mutable `loss_state` on the model, and compute loss using it. Expose `trainer.optimizer` / `trainer.lr_scheduler` to env in the adapter hook.
+**Pattern:** put a mutable `mutable_state` on the model, and compute loss using it. Expose `trainer.optimizer` / `trainer.lr_scheduler` to env in the adapter hook.
 
-#### **Model with `loss_state` \+ custom `compute_loss`**
+#### **Model with `mutable_state` \+ custom `compute_loss`**
 
 import torch  
 from torch import nn  
@@ -813,7 +813,7 @@ class MyHFModel(nn.Module):
        self.net \= nn.Linear(10, 1\)
 
        \# Mutable loss config (hotloss mutates this)  
-       self.loss\_state \= {  
+       self.mutable\_state \= {  
            "weights": {"main": 1.0, "aux": 0.2},  
            "terms": {"aux": True},  
            "ramps": {},  
@@ -834,12 +834,12 @@ class MyTrainer(Trainer):
        labels \= out\["labels"\]
 
        main \= F.mse\_loss(pred, labels)  
-       w\_main \= float(model.loss\_state\["weights"\].get("main", 1.0))  
+       w\_main \= float(model.mutable\_state\["weights"\].get("main", 1.0))  
        loss \= w\_main \* main
 
-       if model.loss\_state\["terms"\].get("aux", False):  
+       if model.mutable\_state\["terms"\].get("aux", False):  
            aux \= pred.abs().mean()  
-           w\_aux \= float(model.loss\_state\["weights"\].get("aux", 0.0))  
+           w\_aux \= float(model.mutable\_state\["weights"\].get("aux", 0.0))  
            loss \= loss \+ w\_aux \* aux
 
        return (loss, out) if return\_outputs else loss
@@ -866,14 +866,14 @@ class HotOpsHFCallback(TrainerCallback):
 
        optimizer \= None  
        scheduler \= None  
-       loss\_state \= None
+       mutable\_state \= None
 
        \# If you can pass trainer/model into kwargs when constructing callbacks, do it.  
        if trainer is not None:  
            optimizer \= getattr(trainer, "optimizer", None)  
            scheduler \= getattr(trainer, "lr\_scheduler", None)  
        if model is not None:  
-           loss\_state \= getattr(model, "loss\_state", None)
+           mutable\_state \= getattr(model, "mutable\_state", None)
 
        env: Dict\[str, Any\] \= {  
            "framework": "hf",  
@@ -885,7 +885,7 @@ class HotOpsHFCallback(TrainerCallback):
            "control": control,  
            "optimizer": optimizer,  
            "scheduler": scheduler,  
-           "loss\_state": loss\_state,  
+           "mutable\_state": mutable\_state,  
            "log": print,  
        }
 
@@ -910,7 +910,7 @@ class HotOpsHFCallback(TrainerCallback):
    def on\_step\_end(self, args, state, control, \*\*kwargs):  
        optimizer \= getattr(self.trainer, "optimizer", None) if self.trainer else None  
        scheduler \= getattr(self.trainer, "lr\_scheduler", None) if self.trainer else None  
-       loss\_state \= getattr(self.model\_ref, "loss\_state", None) if self.model\_ref else None  
+       mutable\_state \= getattr(self.model\_ref, "mutable\_state", None) if self.model\_ref else None  
        ...
 
 Then usage:
@@ -924,7 +924,7 @@ trainer.train()
 
 ### **3\) Bare PyTorch loop**
 
-**Pattern:** pass optimizer and loss\_state directly into `env` right after your step, at your chosen safe point.
+**Pattern:** pass optimizer and mutable\_state directly into `env` right after your step, at your chosen safe point.
 
 import torch  
 import torch.nn.functional as F
@@ -932,7 +932,7 @@ import torch.nn.functional as F
 model \= torch.nn.Linear(10, 1).to(device)  
 optimizer \= torch.optim.AdamW(model.parameters(), lr=3e-4, weight\_decay=0.01)
 
-loss\_state \= {  
+mutable\_state \= {  
    "weights": {"main": 1.0, "aux": 0.2},  
    "terms": {"aux": True},  
    "ramps": {},  
@@ -950,10 +950,10 @@ for epoch in range(num\_epochs):
        pred \= model(x)  
        main \= F.mse\_loss(pred, y)
 
-       loss \= float(loss\_state\["weights"\].get("main", 1.0)) \* main  
-       if loss\_state\["terms"\].get("aux", False):  
+       loss \= float(mutable\_state\["weights"\].get("main", 1.0)) \* main  
+       if mutable\_state\["terms"\].get("aux", False):  
            aux \= pred.abs().mean()  
-           loss \= loss \+ float(loss\_state\["weights"\].get("aux", 0.0)) \* aux
+           loss \= loss \+ float(mutable\_state\["weights"\].get("aux", 0.0)) \* aux
 
        optimizer.zero\_grad(set\_to\_none=True)  
        loss.backward()  
@@ -967,7 +967,7 @@ for epoch in range(num\_epochs):
            "epoch": epoch,  
            "model": model,  
            "optimizer": optimizer,  
-           "loss\_state": loss\_state,  
+           "mutable\_state": mutable\_state,  
            "loss": loss.detach(),  
            "log": print,  
        }  
@@ -987,7 +987,7 @@ hotops \--dir runs/exp1 loss set weights.aux=0.05 terms.aux=true
 * If you have multiple optimizers/schedulers, define your own stable convention:  
   * expose `env["optimizers"] = {...}` and make hotopt accept `name=` selectors, *or*  
   * expose only the primary optimizer as `env["optimizer"]` and keep it simple.  
-* For loss, keep a single mutable `loss_state` dict and always read from it inside your loss computation each step.
+* For loss, keep a single mutable `mutable_state` dict and always read from it inside your loss computation each step.
 
 # **Live CLI Examples**
 

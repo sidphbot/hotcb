@@ -6,6 +6,7 @@ Demonstrates:
 - Live loss weight manipulation via recipe
 - Feature capture data for activation visualization
 - Realistic training dynamics (warmup, plateau, intervention response)
+- Proper HotKernel integration (same path as real training loops)
 
 Usage:
     python -m hotcb.golden_demo
@@ -23,45 +24,11 @@ import time
 from typing import Optional
 
 
-def _write_jsonl(path: str, record: dict) -> None:
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+class _OptProxy:
+    """Minimal optimizer-like object for synthetic demos."""
 
-
-def _read_commands(path: str, offset: int) -> tuple[list[dict], int]:
-    """Read new commands from offset, return (commands, new_offset)."""
-    if not os.path.exists(path):
-        return [], offset
-    cmds = []
-    with open(path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if i < offset:
-                continue
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                cmds.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return cmds, offset + len(cmds)
-
-
-def _read_recipe(path: str) -> list[dict]:
-    """Read all recipe entries from a JSONL file."""
-    entries: list[dict] = []
-    if not os.path.exists(path):
-        return entries
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return entries
+    def __init__(self, **kwargs):
+        self.param_groups = [kwargs]
 
 
 def _golden_training(
@@ -78,16 +45,21 @@ def _golden_training(
     - Task B: Reconstruction (MSE loss -> reconstruction error)
 
     Both tasks share a backbone and have controllable loss weights.
-    A recipe at step 200 shifts focus from Task A to Task B, and at step 500
-    rebalances them.
+    A recipe automatically shifts loss weights at steps 200, 400, 500.
+
+    Uses HotKernel + MetricsCollector + actuators, exactly like a real
+    training integration.
     """
-    metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")
+    from hotcb.kernel import HotKernel
+    from hotcb.metrics import MetricsCollector
+    from hotcb.actuators import OptimizerActuator, MutableStateActuator
+
+    # --- File paths ---
     commands_path = os.path.join(run_dir, "hotcb.commands.jsonl")
-    applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
     features_path = os.path.join(run_dir, "hotcb.features.jsonl")
     recipe_path = os.path.join(run_dir, "hotcb.recipe.jsonl")
 
-    # Write the golden recipe
+    # --- Write recipe display entries (for dashboard UI) ---
     recipe_entries = [
         {"at": {"step": 200}, "module": "loss", "op": "set_params",
          "params": {"weight_a": 0.3, "weight_b": 0.7},
@@ -103,87 +75,58 @@ def _golden_training(
         for entry in recipe_entries:
             f.write(json.dumps(entry) + "\n")
 
-    # Hyperparameters
-    lr = 1e-3
-    wd = 1e-4
-    weight_a = 0.7  # classification weight
-    weight_b = 0.3  # reconstruction weight
+    # --- Scheduled recipe commands (written to commands.jsonl at the right step) ---
+    recipe_schedule = {
+        200: {"module": "loss", "op": "set_params",
+              "params": {"weight_a": 0.3, "weight_b": 0.7}, "source": "recipe"},
+        400: {"module": "opt", "op": "set_params",
+              "params": {"lr": 5e-4}, "source": "recipe"},
+        500: {"module": "loss", "op": "set_params",
+              "params": {"weight_a": 0.5, "weight_b": 0.5}, "source": "recipe"},
+    }
 
-    # Training state
-    loss_a = 2.3 + random.uniform(-0.05, 0.05)  # CE loss
-    loss_b = 1.5 + random.uniform(-0.05, 0.05)  # MSE loss
+    # --- Optimizer proxy ---
+    opt = _OptProxy(lr=1e-3, weight_decay=1e-4)
+
+    # --- Mutable state for multi-task loss weights ---
+    mutable_state = {
+        "weights": {"weight_a": 0.7, "weight_b": 0.3},
+        "terms": {},
+        "ramps": {},
+    }
+
+    # --- Wire HotKernel + MetricsCollector + actuators ---
+    mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
+    kernel.register_actuator("opt", OptimizerActuator())
+    kernel.register_actuator("loss", MutableStateActuator())
+
+    # --- Training state ---
+    loss_a = 2.3 + random.uniform(-0.05, 0.05)   # CE loss
+    loss_b = 1.5 + random.uniform(-0.05, 0.05)   # MSE loss
     val_loss_a = 2.5
     val_loss_b = 1.7
     grad_norm = 4.0
-    cmd_offset = 0
-    recipe_applied: set[int] = set()  # indices of already-applied recipe entries
 
     # Convergence targets
-    target_loss_a = 0.15  # Achievable CE loss
-    target_loss_b = 0.08  # Achievable MSE loss
+    target_loss_a = 0.15
+    target_loss_b = 0.08
 
     for step in range(1, max_steps + 1):
-        # --- Check stop event (for in-process thread control) ---
+        # --- Check stop event ---
         if _stop_event is not None and _stop_event.is_set():
             break
 
-        # --- Process recipe entries (re-read file to pick up scheduled additions) ---
-        current_recipe = _read_recipe(recipe_path)
-        for idx, entry in enumerate(current_recipe):
-            if idx in recipe_applied:
-                continue
-            at_step = entry.get("at", {}).get("step", 0)
-            if step >= at_step:
-                module = entry.get("module", "")
-                op = entry.get("op", "")
-                params = entry.get("params", {})
-                if module == "loss" and op == "set_params":
-                    if "weight_a" in params:
-                        weight_a = float(params["weight_a"])
-                    if "weight_b" in params:
-                        weight_b = float(params["weight_b"])
-                elif module == "opt" and op == "set_params":
-                    if "lr" in params:
-                        lr = float(params["lr"])
-                _write_jsonl(applied_path, {
-                    "step": step, "module": module, "op": op,
-                    "params": params,
-                    "decision": "applied", "status": "applied",
-                    "source": "recipe",
-                    "description": entry.get("description", ""),
-                })
-                recipe_applied.add(idx)
+        # --- Inject scheduled recipe commands ---
+        if step in recipe_schedule:
+            with open(commands_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(recipe_schedule[step]) + "\n")
 
-        # --- Process interactive commands ---
-        cmds, cmd_offset = _read_commands(commands_path, cmd_offset)
-        for cmd in cmds:
-            module = cmd.get("module", "")
-            op = cmd.get("op", "")
-            params = cmd.get("params", {})
-            if module == "opt" and op == "set_params":
-                if "lr" in params:
-                    lr = float(params["lr"])
-                if "weight_decay" in params:
-                    wd = float(params["weight_decay"])
-                _write_jsonl(applied_path, {
-                    "step": step, "module": "opt", "op": "set_params",
-                    "params": {"lr": lr, "weight_decay": wd},
-                    "decision": "applied", "status": "applied",
-                    "source": "interactive",
-                })
-            elif module == "loss" and op == "set_params":
-                if "weight" in params:
-                    weight_a = float(params.get("weight", weight_a))
-                if "weight_a" in params:
-                    weight_a = float(params["weight_a"])
-                if "weight_b" in params:
-                    weight_b = float(params["weight_b"])
-                _write_jsonl(applied_path, {
-                    "step": step, "module": "loss", "op": "set_params",
-                    "params": params,
-                    "decision": "applied", "status": "applied",
-                    "source": "interactive",
-                })
+        # --- Read current state from kernel-managed objects ---
+        lr = opt.param_groups[0]["lr"]
+        wd = opt.param_groups[0]["weight_decay"]
+        weight_a = mutable_state["weights"]["weight_a"]
+        weight_b = mutable_state["weights"]["weight_b"]
 
         # --- Simulate training dynamics ---
         # Warmup phase (steps 1-50)
@@ -221,10 +164,12 @@ def _golden_training(
         val_accuracy_a = min(0.98, max(0.1, 1.0 - val_loss_a * 0.35 + random.gauss(0, 0.01)))
         recon_score = min(0.99, max(0.1, 1.0 - loss_b * 0.5 + random.gauss(0, 0.01)))
 
-        record = {
+        # --- Build env dict ---
+        env = {
             "step": step,
             "epoch": step // 50,
-            "wall_time": time.time(),
+            "optimizer": opt,
+            "mutable_state": mutable_state,
             "metrics": {
                 "train_loss": round(total_loss, 6),
                 "val_loss": round(weight_a * val_loss_a + weight_b * val_loss_b, 6),
@@ -237,6 +182,7 @@ def _golden_training(
                 "recon_score": round(recon_score, 4),
                 "grad_norm": round(grad_norm, 4),
                 "lr": lr,
+                "weight_decay": wd,
                 "weight_a": weight_a,
                 "weight_b": weight_b,
             },
@@ -245,7 +191,9 @@ def _golden_training(
                 "weight_decay": wd,
             },
         }
-        _write_jsonl(metrics_path, record)
+
+        # --- Let kernel process commands + collect metrics ---
+        kernel.apply(env, events=["train_step_end"])
 
         # --- Feature capture (every 20 steps) ---
         if step % 20 == 0:
@@ -259,25 +207,20 @@ def _golden_training(
                     round(math.cos(step * 0.015) * (1 + random.gauss(0, spread)), 4),
                     round(math.sin(step * 0.01 + 1.5) * (1 + random.gauss(0, spread)), 4),
                 ])
-            _write_jsonl(features_path, {
-                "step": step,
-                "layer": "backbone.fc2",
-                "activations": activations,
-            })
+            with open(features_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "step": step,
+                    "layer": "backbone.fc2",
+                    "activations": activations,
+                }) + "\n")
 
         # Check stop event before sleeping
         if _stop_event is not None and _stop_event.is_set():
             break
         time.sleep(step_delay)
 
-    # Final summary
-    _write_jsonl(metrics_path, {
-        "step": max_steps,
-        "metrics": {
-            "train_loss": round(total_loss, 6),
-            "val_loss": round(weight_a * val_loss_a + weight_b * val_loss_b, 6),
-        },
-    })
+    # --- Finalize ---
+    kernel.close(env)
 
 
 def run_golden_demo(
@@ -292,6 +235,7 @@ def run_golden_demo(
     if run_dir is None:
         run_dir = tempfile.mkdtemp(prefix="hotcb_golden_")
 
+    # Bootstrap run directory — truncate any existing files for a clean start
     os.makedirs(run_dir, exist_ok=True)
     for fname in [
         "hotcb.commands.jsonl",
@@ -300,9 +244,7 @@ def run_golden_demo(
         "hotcb.recipe.jsonl",
         "hotcb.features.jsonl",
     ]:
-        path = os.path.join(run_dir, fname)
-        if not os.path.exists(path):
-            open(path, "w").close()
+        open(os.path.join(run_dir, fname), "w").close()
 
     with open(os.path.join(run_dir, "hotcb.freeze.json"), "w") as f:
         json.dump({"mode": "off"}, f)
@@ -336,7 +278,7 @@ def run_golden_demo(
     train_thread.start()
 
     from .server.app import run_server
-    run_server(run_dir=run_dir, host=host, port=port, poll_interval=0.3)
+    run_server(run_dir=run_dir, host=host, port=port, poll_interval=0.3, demo_mode=True)
 
 
 if __name__ == "__main__":

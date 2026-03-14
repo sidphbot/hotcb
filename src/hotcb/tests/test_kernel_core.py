@@ -175,17 +175,17 @@ class TestRouting:
 
     def test_route_to_loss(self, run_dir, make_env, write_commands, read_ledger):
         """Ops with module='loss' reach the loss controller."""
-        loss_state = {"weights": {}, "terms": {}, "ramps": {}}
+        mutable_state = {"weights": {}, "terms": {}, "ramps": {}}
         write_commands({"module": "loss", "op": "set_params", "params": {"kl_w": 0.5}})
         kernel = HotKernel(run_dir, debounce_steps=1)
-        env = make_env(step=1, loss_state=loss_state)
+        env = make_env(step=1, mutable_state=mutable_state)
         kernel.apply(env, ["step"])
 
         ledger = read_ledger()
         assert len(ledger) == 1
         assert ledger[0]["decision"] == "applied"
         assert ledger[0]["module"] == "loss"
-        assert loss_state["weights"]["kl"] == 0.5
+        assert mutable_state["weights"]["kl"] == 0.5
 
     def test_route_to_core(self, run_dir, make_env, write_commands, read_ledger):
         """Ops with module='core' are handled by the kernel itself."""

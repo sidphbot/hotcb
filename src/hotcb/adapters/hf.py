@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 
 from hotcb.kernel import HotKernel
-from hotcb.capabilities import TrainingCapabilities, validate_loss_state
+from hotcb.capabilities import TrainingCapabilities, validate_mutable_state
 
 
 class HotCBHFCallback(TrainerCallback):
@@ -13,7 +13,7 @@ class HotCBHFCallback(TrainerCallback):
     HuggingFace Trainer adapter for hotcb.
 
     Connects HF Trainer hooks to HotKernel, exposing optimizer and
-    loss_state in the env dict for hotopt/hotloss modules.
+    mutable_state in the env dict for hotopt/hotloss modules.
 
     Multi-optimizer support
     -----------------------
@@ -21,10 +21,10 @@ class HotCBHFCallback(TrainerCallback):
     exposed via ``env["optimizers"]``.  Falls back to ``resolve_optimizer``
     (single) for backward compat.
 
-    Loss state auto-detection
-    -------------------------
-    If ``loss_state`` is not explicitly provided, the adapter looks for
-    a ``loss_state`` attribute on the model passed to ``on_step_end``.
+    Mutable state auto-detection
+    ----------------------------
+    If ``mutable_state`` is not explicitly provided, the adapter looks for
+    a ``mutable_state`` attribute on the model passed to ``on_step_end``.
     """
 
     def __init__(
@@ -34,14 +34,14 @@ class HotCBHFCallback(TrainerCallback):
         eval_events: Optional[List[str]] = None,
         resolve_optimizer: Optional[Callable] = None,
         resolve_optimizers: Optional[Callable] = None,
-        loss_state: Optional[Dict[str, Any]] = None,
+        mutable_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.kernel = kernel
         self.train_events = train_events or ["train_step_end"]
         self.eval_events = eval_events or ["eval_end"]
         self._resolve_optimizer = resolve_optimizer
         self._resolve_optimizers = resolve_optimizers
-        self._loss_state = loss_state
+        self._mutable_state = mutable_state
         self._capabilities: Optional[TrainingCapabilities] = None
 
     def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any):
@@ -86,10 +86,10 @@ class HotCBHFCallback(TrainerCallback):
         clip_val = getattr(args, "max_grad_norm", None)
         clip_wired = clip_val is not None and clip_val > 0
 
-        # Loss state
+        # Mutable state
         ls_detected = False
         ls_keys: list[str] = []
-        ls = self._resolve_loss_state_from_model(kwargs.get("model"))
+        ls = self._resolve_mutable_state_from_model(kwargs.get("model"))
         if ls is not None:
             ls_detected = True
             ls_keys = list(ls.get("weights", {}).keys())
@@ -100,8 +100,8 @@ class HotCBHFCallback(TrainerCallback):
             optimizer_names=tuple(opt_names),
             num_param_groups=tuple(group_counts),
             grad_accumulation_steps=accum,
-            loss_state_detected=ls_detected,
-            loss_state_keys=tuple(ls_keys),
+            mutable_state_detected=ls_detected,
+            mutable_state_keys=tuple(ls_keys),
             grad_clip_value=float(clip_val) if clip_val else None,
             grad_clip_wired=clip_wired,
         )
@@ -175,16 +175,16 @@ class HotCBHFCallback(TrainerCallback):
             except Exception:
                 pass
 
-        # -- loss_state (explicit > auto-detected from model) --
-        if self._loss_state is not None:
-            valid, _ = validate_loss_state(self._loss_state)
+        # -- mutable_state (explicit > auto-detected from model) --
+        if self._mutable_state is not None:
+            valid, _ = validate_mutable_state(self._mutable_state)
             if valid:
-                env["loss_state"] = self._loss_state
+                env["mutable_state"] = self._mutable_state
         else:
             model = extra.get("model")
-            ls = self._resolve_loss_state_from_model(model)
+            ls = self._resolve_mutable_state_from_model(model)
             if ls is not None:
-                env["loss_state"] = ls
+                env["mutable_state"] = ls
 
         # -- metrics dict for discovery --
         if eval_metrics:
@@ -228,12 +228,12 @@ class HotCBHFCallback(TrainerCallback):
                 pass
         return []
 
-    def _resolve_loss_state_from_model(self, model: Any) -> Optional[Dict[str, Any]]:
-        """Try to find loss_state on the model."""
+    def _resolve_mutable_state_from_model(self, model: Any) -> Optional[Dict[str, Any]]:
+        """Try to find mutable_state on the model."""
         if model is None:
             return None
-        if hasattr(model, "loss_state"):
-            valid, _ = validate_loss_state(model.loss_state)
+        if hasattr(model, "mutable_state"):
+            valid, _ = validate_mutable_state(model.mutable_state)
             if valid:
-                return model.loss_state
+                return model.mutable_state
         return None

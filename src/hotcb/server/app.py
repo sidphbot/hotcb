@@ -4,7 +4,7 @@ hotcb-server — FastAPI application for the live training dashboard.
 Provides:
 - WebSocket endpoint for streaming metrics / applied / tune data
 - REST endpoints for status, config, and commands
-- Static file serving for the React SPA (when built)
+- Static file serving for the dashboard frontend
 
 Start via CLI::
 
@@ -65,11 +65,13 @@ class ConnectionManager:
             conns.discard(ws)
 
     async def broadcast(self, channel: str, data: Any) -> None:
+        from ..util import sanitize_floats
+        safe_data = sanitize_floats(data)
         conns = self._connections.get(channel, set())
         dead: List[Any] = []
         for ws in conns:
             try:
-                await ws.send_json({"channel": channel, "data": data})
+                await ws.send_json({"channel": channel, "data": safe_data})
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -92,6 +94,7 @@ def create_app(
     *,
     poll_interval: float = 0.5,
     multi_dirs: Optional[List[str]] = None,
+    demo_mode: bool = False,
 ) -> Any:
     """
     Build the FastAPI application wired to *run_dir*.
@@ -132,6 +135,12 @@ def create_app(
     projection_engine = ProjectionEngine()
     notification_engine = NotificationEngine()
     manifold_engine = ManifoldEngine()
+
+    # run_dir is immutable — set once at startup, never changed.
+    # Keep the original CLI path for discovery; resolve for monitoring.
+    cli_run_dir = run_dir
+    run_dir = _resolve_active_run_dir(run_dir)
+
     autopilot_engine = AutopilotEngine.with_default_guidelines(run_dir=run_dir, mode="off")
     training_launcher = TrainingLauncher(run_dir=run_dir)
 
@@ -140,7 +149,7 @@ def create_app(
     autopilot_engine.set_ai_engine(ai_engine)
     _tailer_task: Optional[asyncio.Task] = None
 
-    # Resolve JSONL paths
+    # Resolve JSONL paths — tailer watches run_dir once, forever
     all_dirs = [run_dir] + (multi_dirs or [])
 
     @asynccontextmanager
@@ -232,6 +241,7 @@ def create_app(
 
     # Store references for use by route modules
     app.state.run_dir = run_dir
+    app.state.demo_mode = demo_mode
     app.state.all_dirs = all_dirs
     app.state.manager = manager
     app.state.tailer = tailer
@@ -346,6 +356,27 @@ def create_app(
             "tailer_running": tailer.is_running,
         }
 
+    @app.get("/api/runs/discover")
+    async def discover_runs():
+        """Scan CLI-provided dir for run subdirs with metrics data (TensorBoard-style)."""
+        parent = cli_run_dir
+        discovered = []
+        # Check if parent itself is a run dir
+        parent_metrics = os.path.join(parent, "hotcb.metrics.jsonl")
+        if os.path.exists(parent_metrics):
+            discovered.append(_build_run_info(parent))
+        # Scan subdirs
+        try:
+            for name in sorted(os.listdir(parent)):
+                subpath = os.path.join(parent, name)
+                if os.path.isdir(subpath) and os.path.exists(
+                    os.path.join(subpath, "hotcb.metrics.jsonl")
+                ):
+                    discovered.append(_build_run_info(subpath))
+        except OSError:
+            pass
+        return {"runs": discovered}
+
     # --- UI mode endpoints ---
     _VALID_UI_MODES = {"engineer", "education", "vibe_coder"}
 
@@ -435,35 +466,41 @@ def create_app(
         state["training_running"] = training_launcher.running
         state["training_config"] = training_launcher._config if training_launcher.running else {}
 
-        # Last applied opt/loss params from applied ledger
+        # Last applied opt/loss params — use cached scan to avoid re-reading
+        # the entire file on every poll cycle
         applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
-        last_opt_params: dict = {}
-        last_loss_params: dict = {}
-        if os.path.exists(applied_path):
-            try:
-                with open(applied_path, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if rec.get("decision") != "applied":
-                            continue
-                        if rec.get("module") == "opt" and rec.get("payload"):
-                            last_opt_params.update(rec["payload"])
-                        elif rec.get("module") == "loss" and rec.get("payload"):
-                            last_loss_params.update(rec["payload"])
-            except Exception:
-                pass
+        last_opt_params, last_loss_params, modules_seen = _get_applied_summary(applied_path)
         state["last_opt_params"] = last_opt_params
         state["last_loss_params"] = last_loss_params
+
+        # Module availability detection
+        loss_active = "loss" in modules_seen
+        if not loss_active:
+            try:
+                from ..capabilities import TrainingCapabilities
+                caps = TrainingCapabilities.load(run_dir)
+                if caps and getattr(caps, 'mutable_state_detected', False):
+                    loss_active = True
+            except Exception:
+                pass
+        state["modules_active"] = {
+            "opt": True,
+            "loss": loss_active,
+            "cb": "cb" in modules_seen,
+        }
+
+        # External training detection
+        is_launcher = training_launcher.running or bool(
+            training_launcher._active_config_id
+        )
+        state["is_external"] = not is_launcher and bool(last_metrics)
 
         # AI autopilot state
         if ai_engine:
             state["ai_key_metric"] = ai_engine.state.key_metric
+
+        # Demo mode flag — frontend hides Training card when false
+        state["demo_mode"] = demo_mode
 
         return state
 
@@ -549,11 +586,59 @@ def _discover_metric_names(run_dir: str) -> List[str]:
 
 
 def _read_tail(path: str, last_n: int) -> List[dict]:
-    """Read the last N records from a JSONL file."""
+    """Read the last N records from a JSONL file efficiently.
+
+    For small files or small last_n, reads from the end using seek
+    to avoid scanning the entire file.
+    """
     if not os.path.exists(path):
         return []
-    records: List[dict] = []
     try:
+        file_size = os.path.getsize(path)
+    except OSError:
+        return []
+    if file_size == 0:
+        return []
+
+    # For small files (< 512KB) or requesting everything, just read all
+    if file_size < 512 * 1024 or last_n > 50000:
+        records: List[dict] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except Exception:
+            return []
+        return records[-last_n:]
+
+    # For large files, read from the end — estimate ~200 bytes per record
+    chunk_size = min(file_size, last_n * 300 + 4096)
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, file_size - chunk_size))
+            if f.tell() > 0:
+                f.readline()  # skip partial first line
+            tail_bytes = f.read()
+        lines = tail_bytes.decode("utf-8", errors="replace").splitlines()
+        records = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        if len(records) >= last_n:
+            return records[-last_n:]
+        # If we didn't get enough, fall back to full scan
+        records = []
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -563,13 +648,134 @@ def _read_tail(path: str, last_n: int) -> List[dict]:
                     records.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
+        return records[-last_n:]
     except Exception:
         return []
-    return records[-last_n:]
+
+
+# Cache for applied ledger scan — avoids re-reading entire file every 5s
+_applied_cache: Dict[str, Any] = {"mtime": 0, "size": 0, "opt": {}, "loss": {}, "modules": set()}
+
+
+def _get_applied_summary(applied_path: str) -> tuple:
+    """Return (last_opt_params, last_loss_params, modules_seen) with mtime caching."""
+    try:
+        st = os.stat(applied_path)
+        mtime, size = st.st_mtime, st.st_size
+    except OSError:
+        return {}, {}, set()
+
+    if mtime == _applied_cache["mtime"] and size == _applied_cache["size"]:
+        return dict(_applied_cache["opt"]), dict(_applied_cache["loss"]), set(_applied_cache["modules"])
+
+    last_opt: dict = {}
+    last_loss: dict = {}
+    modules: set = set()
+    try:
+        with open(applied_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                mod = rec.get("module")
+                if mod:
+                    modules.add(mod)
+                if rec.get("decision") != "applied":
+                    continue
+                p = rec.get("params") or rec.get("payload")
+                if mod == "opt" and p:
+                    last_opt.update(p)
+                elif mod == "loss" and p:
+                    last_loss.update(p)
+    except Exception:
+        pass
+
+    _applied_cache.update({"mtime": mtime, "size": size, "opt": dict(last_opt), "loss": dict(last_loss), "modules": set(modules)})
+    return last_opt, last_loss, modules
+
+
+def _resolve_active_run_dir(run_dir: str) -> str:
+    """Resolve run_dir to the active run subdir if it's a parent directory.
+
+    If run_dir contains hotcb.metrics.jsonl directly, it's a single run dir.
+    Otherwise, scan for subdirs with metrics and return the latest.
+    """
+    metrics_direct = os.path.join(run_dir, "hotcb.metrics.jsonl")
+    if os.path.exists(metrics_direct):
+        return run_dir
+    subdirs = []
+    try:
+        for name in os.listdir(run_dir):
+            subpath = os.path.join(run_dir, name)
+            if os.path.isdir(subpath) and os.path.exists(
+                os.path.join(subpath, "hotcb.metrics.jsonl")
+            ):
+                subdirs.append(subpath)
+    except OSError:
+        pass
+    if subdirs:
+        subdirs.sort(key=os.path.getmtime, reverse=True)
+        return subdirs[0]
+    return run_dir
+
+
+def _build_run_info(run_path: str) -> dict:
+    """Build run discovery info from a run directory."""
+    run_id = os.path.basename(run_path)
+    label = run_id
+    step_count = 0
+    metric_names: set = set()
+
+    run_json = os.path.join(run_path, "hotcb.run.json")
+    if os.path.exists(run_json):
+        try:
+            with open(run_json) as f:
+                meta = json.load(f)
+            label = meta.get("config_name", meta.get("config_id", run_id))
+        except Exception:
+            pass
+
+    metrics_path = os.path.join(run_path, "hotcb.metrics.jsonl")
+    if os.path.exists(metrics_path):
+        try:
+            with open(metrics_path) as f:
+                first_rec = None
+                last_rec = None
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    step_count += 1
+                    try:
+                        rec = json.loads(line)
+                        if first_rec is None:
+                            first_rec = rec
+                        last_rec = rec
+                    except json.JSONDecodeError:
+                        continue
+                if first_rec:
+                    metric_names.update(first_rec.get("metrics", {}).keys())
+                if last_rec:
+                    metric_names.update(last_rec.get("metrics", {}).keys())
+        except Exception:
+            pass
+
+    return {
+        "run_id": run_id,
+        "dir": run_path,
+        "label": label,
+        "step_count": step_count,
+        "metric_names": sorted(metric_names),
+    }
 
 
 async def _send_initial_data(ws: Any, run_dir: str, channels: Set[str]) -> None:
     """Send a burst of recent data when a client first connects."""
+    from ..util import sanitize_floats
     channel_files = {
         "metrics": "hotcb.metrics.jsonl",
         "applied": "hotcb.applied.jsonl",
@@ -583,7 +789,7 @@ async def _send_initial_data(ws: Any, run_dir: str, channels: Set[str]) -> None:
         records = _read_tail(os.path.join(run_dir, filename), 200)
         if records:
             try:
-                await ws.send_json({"channel": ch, "data": records, "initial": True})
+                await ws.send_json({"channel": ch, "data": sanitize_floats(records), "initial": True})
             except Exception:
                 break
 
@@ -599,12 +805,13 @@ def run_server(
     port: int = 8421,
     poll_interval: float = 0.5,
     multi_dirs: Optional[List[str]] = None,
+    demo_mode: bool = False,
 ) -> None:
     """Start the dashboard server (blocking)."""
     _check_deps()
     import uvicorn
 
-    app = create_app(run_dir, poll_interval=poll_interval, multi_dirs=multi_dirs)
+    app = create_app(run_dir, poll_interval=poll_interval, multi_dirs=multi_dirs, demo_mode=demo_mode)
     log.info("Starting hotcb dashboard at http://%s:%d", host, port)
     log.info("Monitoring: %s", run_dir)
     uvicorn.run(app, host=host, port=port, log_level="info")

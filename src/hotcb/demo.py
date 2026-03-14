@@ -1,8 +1,9 @@
 """
 hotcb demo — launch a synthetic training with a live dashboard.
 
-Runs a small neural network training loop in a background thread,
-writing metrics to JSONL, while serving the dashboard on localhost.
+Runs a synthetic training loop in a background thread using HotKernel
+for control-plane integration, writing metrics via MetricsCollector,
+while serving the dashboard on localhost.
 Open ``http://localhost:8421`` to interact with knobs, see live charts,
 forecasts, and tinker with the control plane.
 """
@@ -18,28 +19,15 @@ import time
 from typing import Optional
 
 
-def _write_jsonl(path: str, record: dict) -> None:
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+class _OptProxy:
+    """Minimal optimizer-like object for synthetic demos.
 
+    Provides ``param_groups`` so HotOptController can mutate lr/wd
+    exactly as it would with a real ``torch.optim.Optimizer``.
+    """
 
-def _read_commands(path: str, offset: int) -> tuple[list[dict], int]:
-    """Read new commands from offset, return (commands, new_offset)."""
-    if not os.path.exists(path):
-        return [], offset
-    cmds = []
-    with open(path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if i < offset:
-                continue
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                cmds.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return cmds, offset + len(cmds)
+    def __init__(self, **kwargs):
+        self.param_groups = [kwargs]
 
 
 def _demo_training(
@@ -49,54 +37,39 @@ def _demo_training(
     step_delay: float = 0.15,
     _stop_event: Optional[threading.Event] = None,
 ) -> None:
-    """Synthetic training loop that writes hotcb.metrics.jsonl.
+    """Synthetic training loop using HotKernel + MetricsCollector.
 
     Simulates a 2-layer network training on a quadratic task.
-    Responds to lr/wd changes from hotcb.commands.jsonl.
+    Responds to lr/wd changes via the kernel's opt module — dashboard
+    commands are picked up automatically by HotKernel each step.
     """
-    metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")
-    commands_path = os.path.join(run_dir, "hotcb.commands.jsonl")
-    applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
+    from hotcb.kernel import HotKernel
+    from hotcb.metrics import MetricsCollector
+    from hotcb.actuators import OptimizerActuator
 
-    # Simulated hyperparameters
-    lr = 1e-3
-    wd = 1e-4
+    # --- Wire up kernel + metrics ---
+    mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
+    kernel.register_actuator("opt", OptimizerActuator())
 
-    # Simulated training state
+    # --- Optimizer proxy (kernel mutates param_groups in-place) ---
+    opt = _OptProxy(lr=1e-3, weight_decay=1e-4)
+
+    # --- Simulated training state ---
     loss = 2.5 + random.uniform(-0.1, 0.1)
     val_loss = 2.8 + random.uniform(-0.1, 0.1)
     grad_norm = 5.0
-    cmd_offset = 0
 
     for step in range(1, max_steps + 1):
         if _stop_event is not None and _stop_event.is_set():
             break
-        # Check for commands
-        cmds, cmd_offset = _read_commands(commands_path, cmd_offset)
-        for cmd in cmds:
-            module = cmd.get("module", "")
-            op = cmd.get("op", "")
-            params = cmd.get("params", {})
-            if module == "opt" and op == "set_params":
-                if "lr" in params:
-                    lr = float(params["lr"])
-                if "weight_decay" in params:
-                    wd = float(params["weight_decay"])
-                _write_jsonl(applied_path, {
-                    "step": step, "module": "opt", "op": "set_params",
-                    "params": {"lr": lr, "weight_decay": wd},
-                    "decision": "applied", "status": "applied",
-                    "source": cmd.get("source", "interactive"),
-                })
-            elif module == "loss" and op == "set_params":
-                _write_jsonl(applied_path, {
-                    "step": step, "module": "loss", "op": "set_params",
-                    "params": params,
-                    "decision": "applied", "status": "applied",
-                    "source": cmd.get("source", "interactive"),
-                })
 
-        # Simulate loss decay with noise
+        # Read lr and wd FROM the proxy — kernel's opt module mutates these
+        # when dashboard commands arrive via hotcb.commands.jsonl
+        lr = opt.param_groups[0]["lr"]
+        wd = opt.param_groups[0].get("weight_decay", 1e-4)
+
+        # --- Simulate loss decay with noise ---
         # lr affects convergence speed; wd adds regularization effect
         lr_factor = min(lr * 300, 1.0)  # higher lr = faster convergence up to a point
         decay = 0.005 * lr_factor * (1 + 0.3 * math.sin(step * 0.05))
@@ -115,30 +88,44 @@ def _demo_training(
         accuracy = min(0.99, max(0.1, 1.0 - loss * 0.35 + random.gauss(0, 0.01)))
         val_accuracy = min(0.99, max(0.1, 1.0 - val_loss * 0.3 + random.gauss(0, 0.015)))
 
-        record = {
+        # --- Build env dict for the kernel ---
+        env = {
+            "framework": "synthetic",
+            "phase": "train",
             "step": step,
+            "optimizer": opt,
             "metrics": {
                 "train_loss": round(loss, 6),
                 "val_loss": round(val_loss, 6),
                 "grad_norm": round(grad_norm, 4),
                 "lr": lr,
+                "weight_decay": wd,
                 "accuracy": round(accuracy, 4),
                 "val_accuracy": round(val_accuracy, 4),
             },
+            "log": lambda s: None,
         }
-        _write_jsonl(metrics_path, record)
+
+        # --- Kernel safe-point: poll commands, apply ops, collect metrics ---
+        kernel.apply(env, events=["train_step_end"])
+
         if _stop_event is not None and _stop_event.is_set():
             break
         time.sleep(step_delay)
 
-    # Write a final summary (only numeric metrics to avoid parse errors)
-    _write_jsonl(metrics_path, {
+    # --- Finalize ---
+    final_env = {
+        "framework": "synthetic",
+        "phase": "train",
         "step": max_steps,
+        "optimizer": opt,
         "metrics": {
             "train_loss": round(loss, 6),
             "val_loss": round(val_loss, 6),
         },
-    })
+        "log": lambda s: None,
+    }
+    kernel.close(final_env)
 
 
 def run_demo(
@@ -153,7 +140,7 @@ def run_demo(
     if run_dir is None:
         run_dir = tempfile.mkdtemp(prefix="hotcb_demo_")
 
-    # Bootstrap run directory
+    # Bootstrap run directory — truncate any existing files for a clean start
     os.makedirs(run_dir, exist_ok=True)
     for fname in [
         "hotcb.commands.jsonl",
@@ -161,9 +148,7 @@ def run_demo(
         "hotcb.metrics.jsonl",
         "hotcb.recipe.jsonl",
     ]:
-        path = os.path.join(run_dir, fname)
-        if not os.path.exists(path):
-            open(path, "w").close()
+        open(os.path.join(run_dir, fname), "w").close()
 
     # Write freeze state
     with open(os.path.join(run_dir, "hotcb.freeze.json"), "w") as f:
@@ -182,4 +167,4 @@ def run_demo(
     # Run dashboard server (blocking) — training is started from the UI
     from .server.app import run_server
 
-    run_server(run_dir=run_dir, host=host, port=port, poll_interval=0.3)
+    run_server(run_dir=run_dir, host=host, port=port, poll_interval=0.3, demo_mode=True)

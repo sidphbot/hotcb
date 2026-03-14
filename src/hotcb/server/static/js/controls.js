@@ -10,6 +10,45 @@ var _applyQueue = [];
 var _lastApplyStep = 0;
 var _healthEma = null;  // EMA-smoothed health score
 
+// Track last-applied slider values for staged-change highlighting
+var _appliedKnobs = {};
+
+function _markStagedChanges() {
+  var knobs = {
+    lr: {slider: 'knobLr', transform: function(v) { return Math.pow(10, parseFloat(v)); }},
+    wd: {slider: 'knobWd', transform: function(v) { return Math.pow(10, parseFloat(v)); }},
+    loss_w: {slider: 'knobLossW', transform: function(v) { return parseFloat(v); }},
+    weight_a: {slider: 'knobWeightA', transform: function(v) { return parseFloat(v); }},
+    weight_b: {slider: 'knobWeightB', transform: function(v) { return parseFloat(v); }},
+  };
+  Object.keys(knobs).forEach(function(key) {
+    var cfg = knobs[key];
+    var el = document.getElementById(cfg.slider);
+    if (!el) return;
+    var row = el.closest('.knob-row');
+    if (!row) return;
+    var current = cfg.transform(el.value);
+    var applied = _appliedKnobs[key];
+    if (applied !== undefined && Math.abs(current - applied) / Math.max(Math.abs(applied), 1e-12) > 0.005) {
+      row.classList.add('staged');
+    } else {
+      row.classList.remove('staged');
+    }
+  });
+}
+
+function _snapshotAppliedKnobs() {
+  _appliedKnobs.lr = lrFromSlider($('#knobLr').value);
+  _appliedKnobs.wd = Math.pow(10, parseFloat($('#knobWd').value));
+  _appliedKnobs.loss_w = parseFloat($('#knobLossW').value);
+  _appliedKnobs.weight_a = parseFloat($('#knobWeightA').value);
+  _appliedKnobs.weight_b = parseFloat($('#knobWeightB').value);
+  var bbEl = $('#knobBackbone');
+  if (bbEl) _appliedKnobs.backbone_frozen = bbEl.value === '1';
+  // Clear all staged highlights
+  document.querySelectorAll('.knob-row.staged').forEach(function(el) { el.classList.remove('staged'); });
+}
+
 function debounceApply(fn, delay) {
   if (_applyDebounceTimer) clearTimeout(_applyDebounceTimer);
   _applyDebounceTimer = setTimeout(fn, delay || 300);
@@ -26,6 +65,9 @@ function _clearTrainingState() {
   S.chatHistory = [];
   S.alerts = [];
   _healthEma = null;
+  _appliedKnobs = {};
+  // Reset WS slider sync flag so next training session re-syncs
+  if (typeof _slidersInitialized !== 'undefined') _slidersInitialized = false;
   // Clear focus/zoom state
   if (S.focusMetric) {
     S.focusMetric = null;
@@ -44,6 +86,15 @@ function _clearTrainingState() {
   // Clear forecast cache
   _forecastCache = {};
   _highlightedMutationStep = null;
+  // Clear metric toggle state so old metric names don't persist
+  if (typeof _metricToggleState !== 'undefined') _metricToggleState = {};
+  if (typeof _metricDropdownShowAll !== 'undefined') _metricDropdownShowAll = false;
+  if (typeof _lastMetricCount !== 'undefined') _lastMetricCount = 0;
+  // Reset run-reset detection
+  if (typeof _lastSeenMaxStep !== 'undefined') _lastSeenMaxStep = 0;
+  // Reset step range to "All" for fresh run
+  if (typeof _chartStepRange !== 'undefined') _chartStepRange = 'all';
+  if (typeof _updateRangeButtons === 'function') _updateRangeButtons();
   clearTimelineDedup();
   updateMetricToggles();
   updateChart();
@@ -74,52 +125,93 @@ function initControls() {
   $('#knobLr').addEventListener('input', function(e) {
     var v = lrFromSlider(e.target.value);
     $('#knobLrVal').value = v.toExponential(2);
+    _markStagedChanges();
   });
   $('#knobWd').addEventListener('input', function(e) {
     var v = Math.pow(10, parseFloat(e.target.value));
     $('#knobWdVal').value = v.toExponential(2);
+    _markStagedChanges();
   });
   $('#knobLossW').addEventListener('input', function(e) {
     $('#knobLossWVal').value = parseFloat(e.target.value).toFixed(2);
+    _markStagedChanges();
   });
   $('#knobWeightA').addEventListener('input', function(e) {
     $('#knobWeightAVal').value = parseFloat(e.target.value).toFixed(2);
+    _markStagedChanges();
   });
   $('#knobWeightB').addEventListener('input', function(e) {
     $('#knobWeightBVal').value = parseFloat(e.target.value).toFixed(2);
+    _markStagedChanges();
   });
 
-  // Apply
+  // Apply — diff-only: only send params that actually changed
   $('#btnApply').addEventListener('click', function() {
     var btn = $('#btnApply');
     btn.textContent = 'Queued...';
     btn.disabled = true;
     debounceApply(async function() {
+      var anyChanged = false;
+      // Threshold: relative difference > 0.5% avoids floating-point noise
+      function _isDiff(current, baseline) {
+        if (baseline === undefined) return true;
+        var denom = Math.max(Math.abs(baseline), 1e-12);
+        return Math.abs(current - baseline) / denom > 0.005;
+      }
+
+      // OPT params — only include changed values
       var lr = lrFromSlider($('#knobLr').value);
       var wd = Math.pow(10, parseFloat($('#knobWd').value));
-      var optParams = {lr: lr, weight_decay: wd};
-      // Include opt_idx for multi-optimizer setups
-      var optIdxSel = document.getElementById('knobOptIdx');
-      if (optIdxSel && optIdxSel.parentElement.style.display !== 'none') {
-        var idx = parseInt(optIdxSel.value);
-        if (idx > 0) optParams.opt_idx = idx;
+      var changedOpt = {};
+      if (_isDiff(lr, _appliedKnobs.lr)) changedOpt.lr = lr;
+      if (_isDiff(wd, _appliedKnobs.wd)) changedOpt.weight_decay = wd;
+      if (Object.keys(changedOpt).length > 0) {
+        var optIdxSel = document.getElementById('knobOptIdx');
+        if (optIdxSel && optIdxSel.parentElement.style.display !== 'none') {
+          var idx = parseInt(optIdxSel.value);
+          if (idx > 0) changedOpt.opt_idx = idx;
+        }
+        await api('POST', '/api/opt/set', {params: changedOpt});
+        anyChanged = true;
       }
-      await api('POST', '/api/opt/set', {params: optParams});
 
+      // LOSS params — only include changed values
       var configId = $('#trainConfig').value;
       if (configId === 'multitask') {
         var wa = parseFloat($('#knobWeightA').value);
         var wb = parseFloat($('#knobWeightB').value);
-        await api('POST', '/api/loss/set', {params: {weight_a: wa, weight_b: wb}});
+        var changedLoss = {};
+        if (_isDiff(wa, _appliedKnobs.weight_a)) changedLoss.weight_a = wa;
+        if (_isDiff(wb, _appliedKnobs.weight_b)) changedLoss.weight_b = wb;
+        if (Object.keys(changedLoss).length > 0) {
+          await api('POST', '/api/loss/set', {params: changedLoss});
+          anyChanged = true;
+        }
       } else {
         var lw = parseFloat($('#knobLossW').value);
-        if (lw !== 1.0) await api('POST', '/api/loss/set', {params: {weight: lw}});
+        if (_isDiff(lw, _appliedKnobs.loss_w)) {
+          await api('POST', '/api/loss/set', {params: {weight: lw}});
+          anyChanged = true;
+        }
       }
 
+      // CB params — only send if backbone toggle changed
       if (configId === 'finetune') {
         var frozen = $('#knobBackbone').value === '1';
-        await api('POST', '/api/cb/set_params', {params: {backbone_frozen: frozen}});
+        if (_appliedKnobs.backbone_frozen === undefined || frozen !== _appliedKnobs.backbone_frozen) {
+          await api('POST', '/api/cb/set_params', {params: {backbone_frozen: frozen}});
+          anyChanged = true;
+        }
       }
+
+      if (!anyChanged) {
+        btn.textContent = 'No changes';
+        btn.disabled = false;
+        setTimeout(function() { btn.textContent = 'Apply'; }, 1500);
+        return;
+      }
+
+      _snapshotAppliedKnobs();
       updateChart();
       // Snapshot forecast at mutation point
       var allSteps = [];
@@ -341,6 +433,9 @@ function initControls() {
   $('#themeSelect').addEventListener('change', function(e) {
     setTheme(e.target.value);
   });
+
+  // Hydrate controls from server state (works for both launcher and external training)
+  hydrateControlsFromServer().then(function() { _snapshotAppliedKnobs(); });
 }
 
 /* ================================================================ */
@@ -375,7 +470,7 @@ async function loadCapabilities() {
     }
 
     // Loss state: show/hide loss controls based on detected keys
-    if (caps.loss_state_detected && caps.loss_state_keys && caps.loss_state_keys.length > 0) {
+    if (caps.mutable_state_detected && caps.mutable_state_keys && caps.mutable_state_keys.length > 0) {
       // Show loss controls — they might be hidden if no demo config selected
       var lossRows = document.querySelectorAll('[data-param="loss_w"]');
       lossRows.forEach(function(el) { el.style.display = ''; });
@@ -390,6 +485,10 @@ async function loadCapabilities() {
 
 function syncSlidersFromApplied(params) {
   if (!params || typeof params !== 'object') return;
+  // Update applied knobs baseline so staged highlights reset
+  Object.keys(params).forEach(function(k) {
+    if (typeof params[k] === 'number') _appliedKnobs[k] = params[k];
+  });
 
   // lr
   if ('lr' in params && typeof params.lr === 'number' && params.lr > 0) {
@@ -426,6 +525,83 @@ function syncSlidersFromApplied(params) {
   }
 }
 
+async function hydrateControlsFromServer() {
+  try {
+    var state = await api('GET', '/api/state/controls');
+    if (!state) return;
+
+    // Demo mode gate: hide entire Training card when not in demo mode
+    if (state.demo_mode === false) {
+      var trainPanel = document.getElementById('trainPanel');
+      if (trainPanel) {
+        var trainCard = trainPanel.closest('.card');
+        if (trainCard) trainCard.style.display = 'none';
+      }
+    }
+
+    // Sync sliders from last applied params
+    if (state.last_opt_params) syncSlidersFromApplied(state.last_opt_params);
+    if (state.last_loss_params) syncSlidersFromApplied(state.last_loss_params);
+
+    // Adaptive controls: hide modules not active for this training
+    var mods = state.modules_active || {opt: true, loss: false, cb: false};
+    if (!mods.loss) {
+      document.querySelectorAll('.single-loss-only, .multitask-only').forEach(function(el) {
+        el.style.display = 'none';
+      });
+    }
+    if (!mods.cb) {
+      document.querySelectorAll('.finetune-only').forEach(function(el) {
+        el.style.display = 'none';
+      });
+    }
+
+    // External training: hide demo config dropdown, show attached label
+    if (state.is_external) {
+      var trainConfig = document.getElementById('trainConfig');
+      var trainConfigDesc = document.getElementById('trainConfigDesc');
+      if (trainConfig) trainConfig.style.display = 'none';
+      if (trainConfigDesc) trainConfigDesc.textContent = 'External Training (attached)';
+    }
+
+    // Sync config from run.json (for non-launcher runs)
+    var runCfg = state.run_config || {};
+    if (runCfg.config_id) {
+      var sel = document.getElementById('trainConfig');
+      // Only sync if it's a known config
+      if (sel) {
+        var found = false;
+        for (var i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === runCfg.config_id) { found = true; break; }
+        }
+        if (found) {
+          sel.value = runCfg.config_id;
+          _updateConfigControls(runCfg.config_id);
+        }
+      }
+      if (runCfg.max_steps) {
+        var msEl = document.getElementById('trainMaxSteps');
+        if (msEl) msEl.value = runCfg.max_steps;
+      }
+    }
+
+    // Sync step counter
+    if (state.latest_step) {
+      var stepEl = document.getElementById('stepValue');
+      if (stepEl) stepEl.textContent = state.latest_step;
+    }
+
+    // Sync autopilot mode
+    if (state.autopilot_mode && state.autopilot_mode !== 'off') {
+      var modeSelect = document.getElementById('autopilotMode');
+      if (modeSelect) {
+        modeSelect.value = state.autopilot_mode;
+        _updateAIConfigVisibility(state.autopilot_mode);
+      }
+    }
+  } catch (e) { /* ignore hydration errors */ }
+}
+
 function setTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem('hotcb-theme', theme);
@@ -437,6 +613,17 @@ function setTheme(theme) {
   }
   if (S.featureCtx && S.featureCtx.scene) {
     S.featureCtx.scene.background = new THREE.Color(bgColor);
+  }
+  // Update chart tooltip colors for new theme
+  if (S.chartInstance) {
+    var cs = getComputedStyle(document.documentElement);
+    S.chartInstance.options.plugins.tooltip.backgroundColor = cs.getPropertyValue('--bg-card').trim();
+    S.chartInstance.options.plugins.tooltip.borderColor = cs.getPropertyValue('--border-bright').trim();
+    S.chartInstance.options.scales.x.grid.color = cs.getPropertyValue('--border').trim();
+    S.chartInstance.options.scales.y.grid.color = cs.getPropertyValue('--border').trim();
+    S.chartInstance.options.scales.x.ticks.color = cs.getPropertyValue('--text-muted').trim();
+    S.chartInstance.options.scales.y.ticks.color = cs.getPropertyValue('--text-muted').trim();
+    S.chartInstance.update('none');
   }
 }
 
@@ -574,6 +761,10 @@ function setHealth(score, desc) {
   $('#healthDesc').textContent = desc;
 }
 
+var _lastSyncedConfigId = null;
+var _wasTrainingRunning = false;
+var _runConfigName = '';
+
 async function pollTrainStatus() {
   try {
     var res = await api('GET', '/api/train/status');
@@ -582,25 +773,51 @@ async function pollTrainStatus() {
     var btnStart = $('#btnTrainStart');
     var btnStop = $('#btnTrainStop');
     if (res.running) {
-      var info = 'Running since ' + res.started_at;
-      if (res.config && res.config.max_steps) {
-        info += ' (' + res.config.max_steps + ' steps)';
-      }
-      if (res.config && res.config.seed !== undefined) {
-        info += ' seed=' + res.config.seed;
-        // Backfill seed input so user can see/copy it
-        var seedInput = document.getElementById('trainSeed');
-        if (seedInput && !seedInput.value) seedInput.value = res.config.seed;
-      }
+      _wasTrainingRunning = true;
+      var cfg = res.config || {};
+      _runConfigName = cfg.config_name || cfg.config_id || '';
+      var info = 'Running: ' + (cfg.config_name || cfg.config_id || '?');
+      if (cfg.max_steps) info += ' (' + cfg.max_steps + ' steps)';
+      if (cfg.seed !== undefined) info += ' seed=' + cfg.seed;
       el.textContent = info;
       el.style.color = 'var(--green, #4ade80)';
       btnStart.disabled = true;
       btnStop.disabled = false;
+
+      // Sync controls to match the running config (once per config change)
+      if (cfg.config_id && cfg.config_id !== _lastSyncedConfigId) {
+        _lastSyncedConfigId = cfg.config_id;
+        var sel = document.getElementById('trainConfig');
+        if (sel && sel.value !== cfg.config_id) {
+          sel.value = cfg.config_id;
+          _updateConfigControls(cfg.config_id);
+          var desc = document.getElementById('trainConfigDesc');
+          if (desc && cfg.config_name) desc.textContent = cfg.config_name;
+        }
+        if (cfg.max_steps) {
+          var msEl = document.getElementById('trainMaxSteps');
+          if (msEl) msEl.value = cfg.max_steps;
+        }
+        if (cfg.step_delay !== undefined) {
+          var sdEl = document.getElementById('trainStepDelay');
+          if (sdEl) sdEl.value = cfg.step_delay;
+        }
+        if (cfg.seed !== undefined) {
+          var seedInput = document.getElementById('trainSeed');
+          if (seedInput) seedInput.value = cfg.seed;
+        }
+      }
     } else {
+      // Detect running → stopped transition
+      if (_wasTrainingRunning) {
+        _wasTrainingRunning = false;
+        showRunSummary(_runConfigName);
+      }
       el.textContent = 'Stopped';
       el.style.color = 'var(--text-muted)';
       btnStart.disabled = false;
       btnStop.disabled = true;
+      _lastSyncedConfigId = null;
     }
   } catch (e) { /* ignore poll errors */ }
 }
@@ -786,9 +1003,11 @@ async function pollAutopilotStatus() {
         var ruleId = action.rule_id || '?';
         var condition = action.condition_met || '';
         if (condition.length > 80) condition = condition.substring(0, 77) + '...';
+        var fullCondition = action.condition_met || '';
         div.innerHTML = badge + ' <span style="color:var(--text-muted)">step ' + step + '</span> ' +
                         '<span style="color:var(--cyan)">' + ruleId + '</span><br>' +
-                        '<span style="color:var(--text-muted)">' + condition + '</span>';
+                        '<span class="ap-condition" style="color:var(--text-muted);cursor:help" title="' +
+                        fullCondition.replace(/"/g, '&quot;') + '">' + condition + '</span>';
 
         // Add "Apply" button for proposed (suggest-mode) actions
         if (action.status === 'proposed' && action.action_id) {

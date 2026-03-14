@@ -80,24 +80,25 @@ for step in range(max_steps):
 from hotcb.kernel import HotKernel
 from hotcb.metrics import MetricsCollector
 
-kernel = HotKernel(run_dir="./runs/exp1", debounce_steps=10)
-mc = MetricsCollector("./runs/exp1/hotcb.metrics.jsonl")
+mc = MetricsCollector(os.path.join("./runs/exp1", "hotcb.metrics.jsonl"))
+kernel = HotKernel(run_dir="./runs/exp1", debounce_steps=10, metrics_collector=mc)
 
 for step, batch in enumerate(dataloader):
     loss = train_step(batch)
-    mc.log(step=step, metrics={"loss": loss.item(), "lr": optimizer.param_groups[0]["lr"]})
 
-    kernel.apply(
-        env={
-            "framework": "torch",
-            "phase": "train",
-            "step": step,
-            "optimizer": optimizer,
-            "loss_state": model.loss_state,  # optional, for loss weight control
-            "log": print,
+    env = {
+        "framework": "torch",
+        "phase": "train",
+        "step": step,
+        "optimizer": optimizer,
+        "mutable_state": getattr(model, "mutable_state", None),  # optional, for loss weight control
+        "metrics": {
+            "loss": loss.item(),
+            "lr": optimizer.param_groups[0]["lr"],
         },
-        events=["train_step_end"],
-    )
+        "log": print,
+    }
+    kernel.apply(env, events=["train_step_end"])
 ```
 
 ## Option C: Framework Adapters (Lightning / HuggingFace)
@@ -159,7 +160,7 @@ If your model has a multi-task or weighted loss, expose it as a mutable dict:
 
 ```python
 # On your model or as a standalone dict
-loss_state = {
+mutable_state = {
     "weights": {"cls": 1.0, "recon": 0.5, "reg": 0.1},
     "terms": {"cls": True, "recon": True, "reg": True},  # toggleable
 }
@@ -262,15 +263,15 @@ Key points:
 
 ### Using HotKernel instead of manual command polling
 
-If you prefer the full kernel (automatic command routing, loss_state support, freeze modes):
+If you prefer the full kernel (automatic command routing, mutable_state support, freeze modes):
 
 ```python
 def train(run_dir, max_steps, step_delay, stop_event):
     from hotcb.kernel import HotKernel
     from hotcb.metrics import MetricsCollector
 
-    kernel = HotKernel(run_dir=run_dir, debounce_steps=10)
     mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=10, metrics_collector=mc)
 
     model = build_model()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -284,12 +285,19 @@ def train(run_dir, max_steps, step_delay, stop_event):
         optimizer.step()
         optimizer.zero_grad()
 
-        mc.log(step=step, metrics={"loss": loss.item(), "lr": optimizer.param_groups[0]["lr"]})
-        kernel.apply(
-            env={"framework": "torch", "phase": "train", "step": step,
-                 "optimizer": optimizer, "loss_state": getattr(model, "loss_state", None), "log": print},
-            events=["train_step_end"],
-        )
+        env = {
+            "framework": "torch",
+            "phase": "train",
+            "step": step,
+            "optimizer": optimizer,
+            "mutable_state": getattr(model, "mutable_state", None),
+            "metrics": {
+                "loss": loss.item(),
+                "lr": optimizer.param_groups[0]["lr"],
+            },
+            "log": print,
+        }
+        kernel.apply(env, events=["train_step_end"])
 
         if step_delay > 0:
             time.sleep(step_delay)

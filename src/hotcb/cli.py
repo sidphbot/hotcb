@@ -430,15 +430,6 @@ def cmd_launch(args: argparse.Namespace) -> None:
     train_fn = getattr(args, "train_fn", None)
     config = getattr(args, "config", "multitask")
 
-    w = sys.stderr.write
-    w("\n")
-    w("  hotcb launch\n")
-    w(f"  autopilot: {args.autopilot}\n")
-    if args.key_metric:
-        w(f"  key metric: {args.key_metric}\n")
-    w(f"  dashboard: http://{args.host}:{args.port}\n")
-    w("\n")
-
     handle = launch(
         train_fn=train_fn,
         config=config,
@@ -746,13 +737,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     plaunch = sub.add_parser("launch", help="Start training + dashboard + autopilot in one command")
     plaunch.add_argument("--config", default="multitask", help="Built-in config: simple, multitask, finetune")
-    plaunch.add_argument("--config-file", default=None, help="Path to hotcb.launch.json (values used as defaults, CLI flags override)")
+    plaunch.add_argument("--config-file", default='hotcb.launch.json', help="Path to hotcb.launch.json (values used as defaults, CLI flags override)")
     plaunch.add_argument("--train-fn", default=None, help="Custom training function (module.path:fn_name)")
     plaunch.add_argument("--host", default="0.0.0.0", help="Bind host")
     plaunch.add_argument("--port", type=int, default=8421, help="Bind port")
-    plaunch.add_argument("--max-steps", type=int, default=800, help="Number of training steps")
+    plaunch.add_argument("--max-steps", type=int, default=None, help="Number of training steps (default: from config file, or 1000)")
     plaunch.add_argument("--max-time", type=float, default=None, help="Wall-clock time limit in seconds (stops training when reached)")
-    plaunch.add_argument("--step-delay", type=float, default=0.12, help="Seconds between steps")
+    plaunch.add_argument("--step-delay", type=float, default=None, help="Seconds between steps (default: from config file, or 0.1)")
     plaunch.add_argument("--autopilot", choices=["off", "suggest", "auto", "ai_suggest", "ai_auto"],
                           default="off", help="Autopilot mode")
     plaunch.add_argument("--key-metric", default="val_loss", help="Primary optimization metric")

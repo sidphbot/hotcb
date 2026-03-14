@@ -10,6 +10,10 @@ async function api(method, path, body) {
   if (body) opts.body = JSON.stringify(body);
   try {
     const r = await fetch(path, opts);
+    if (!r.ok) {
+      console.warn('API', r.status, path);
+      try { return await r.json(); } catch(_) { return null; }
+    }
     return await r.json();
   } catch (e) { console.error('API error:', path, e); return null; }
 }

@@ -39,7 +39,7 @@ hottune consists of five layers:
 ```python
 from hotcb import HotKernel
 from hotcb.adapters.lightning import HotCBLightning
-from hotcb.actuators import OptimizerActuator, LossStateActuator
+from hotcb.actuators import OptimizerActuator, MutableStateActuator
 
 kernel = HotKernel(
     run_dir="runs/exp1",
@@ -48,9 +48,9 @@ kernel = HotKernel(
 
 # Register actuators so tune knows what it can mutate
 kernel.register_actuator("opt", OptimizerActuator())
-kernel.register_actuator("loss", LossStateActuator())
+kernel.register_actuator("loss", MutableStateActuator())
 
-trainer = pl.Trainer(callbacks=[HotCBLightning(kernel, loss_state=model.loss_state)])
+trainer = pl.Trainer(callbacks=[HotCBLightning(kernel, mutable_state=model.mutable_state)])
 trainer.fit(model, datamodule=dm)
 ```
 
@@ -116,7 +116,7 @@ Actuators are the bridge between the tuner and live training state.
 | `wd_set` | Absolute weight decay set |
 | `betas_set` | Set Adam betas |
 
-**LossStateActuator** -- mutates loss weights:
+**MutableStateActuator** -- mutates loss weights:
 
 | Op | Description |
 |---|---|

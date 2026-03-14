@@ -79,8 +79,8 @@ def _get_builtin_configs() -> List[TrainingConfig]:
             name="Finetune (Pretrained Backbone)",
             description=(
                 "Transfer learning simulation: pretrained backbone finetuned "
-                "on a small dataset. Backbone freeze/unfreeze is the control "
-                "toggle. Shows overfitting dynamics on small data."
+                "on a small dataset with recipe-driven LR scheduling. "
+                "Shows overfitting dynamics and mutation impact on convergence."
             ),
             train_fn=_run_finetune,
             defaults={"max_steps": 600, "step_delay": 0.12},
@@ -197,7 +197,10 @@ class TrainingLauncher:
         import random as _rng
         effective_seed = seed if seed is not None else _rng.randint(0, 2**31 - 1)
 
-        self._active_run_dir = run_dir or self._run_dir
+        # Write flat to run_dir — no subdirs, no rewiring.
+        # Truncate existing JSONL files for a clean start.
+        target_dir = run_dir or self._run_dir
+        self._active_run_dir = target_dir
         self._active_config_id = config_id
         self._config = {
             "config_id": config_id,
@@ -208,14 +211,12 @@ class TrainingLauncher:
         }
         self._stop_event.clear()
 
-        # Ensure run_dir exists and seed empty JSONL files
-        os.makedirs(self._active_run_dir, exist_ok=True)
+        os.makedirs(target_dir, exist_ok=True)
         for fname in _JSONL_FILES:
-            path = os.path.join(self._active_run_dir, fname)
-            if not os.path.exists(path):
-                open(path, "w").close()
+            path = os.path.join(target_dir, fname)
+            open(path, "w").close()  # truncate for clean start
 
-        freeze_path = os.path.join(self._active_run_dir, "hotcb.freeze.json")
+        freeze_path = os.path.join(target_dir, "hotcb.freeze.json")
         if not os.path.exists(freeze_path):
             with open(freeze_path, "w") as f:
                 json.dump({"mode": "off"}, f)
@@ -230,22 +231,22 @@ class TrainingLauncher:
             "step_delay": effective_delay,
             "seed": effective_seed,
             "started_at": self._started_at,
-            "run_dir": self._active_run_dir,
+            "run_dir": target_dir,
         }
         self._run_meta = run_meta
-        with open(os.path.join(self._active_run_dir, "hotcb.run.json"), "w") as f:
+        with open(os.path.join(target_dir, "hotcb.run.json"), "w") as f:
             json.dump(run_meta, f, indent=2)
 
         log.info(
             "[hotcb.launcher] starting %s (run_dir=%s, steps=%d, delay=%.3f)",
-            cfg.name, self._active_run_dir, effective_steps, effective_delay,
+            cfg.name, target_dir, effective_steps, effective_delay,
         )
 
         self._thread = threading.Thread(
             target=self._run_training,
             kwargs={
                 "train_fn": cfg.train_fn,
-                "run_dir": self._active_run_dir,
+                "run_dir": target_dir,
                 "max_steps": effective_steps,
                 "step_delay": effective_delay,
             },
@@ -257,7 +258,7 @@ class TrainingLauncher:
 
         return {
             "started": True,
-            "run_dir": self._active_run_dir,
+            "run_dir": target_dir,
             "config": self._config,
         }
 
@@ -308,15 +309,7 @@ class TrainingLauncher:
         except Exception:
             pass
 
-        # Append to parent-level history
-        parent_dir = os.path.dirname(run_dir.rstrip("/"))
-        if parent_dir:
-            history_path = os.path.join(parent_dir, "hotcb.runs.jsonl")
-            try:
-                with open(history_path, "a") as f:
-                    f.write(json.dumps(summary) + "\n")
-            except Exception:
-                pass
+        # Run summary is now in the run's own hotcb.run.json (no global index)
 
     def stop(self) -> dict:
         if not self.running:
@@ -393,13 +386,17 @@ def create_router(launcher: Optional[TrainingLauncher] = None) -> Any:
         )
         if "error" in result:
             return JSONResponse(status_code=409, content=result)
-        # Clear stale engine state from previous runs
+        # run_dir is immutable — launcher writes flat to it, tailer already watches it.
+        # Clear stale engine state from previous runs.
         projection = getattr(request.app.state, 'projection_engine', None)
         if projection:
             projection._steps.clear()
             projection._metrics.clear()
             projection._hp_keys.clear()
             projection._hp_values.clear()
+        autopilot = getattr(request.app.state, 'autopilot_engine', None)
+        if autopilot and hasattr(autopilot, 'reset'):
+            autopilot.reset()
         return result
 
     @router.get("/status")
@@ -477,35 +474,33 @@ def create_router(launcher: Optional[TrainingLauncher] = None) -> Any:
 
         return {"runs": runs}
 
+    def _find_run_dir(run_id: str) -> Optional[str]:
+        """Find a run directory by run_id (subdir name or run.json match)."""
+        rd = _launcher._run_dir
+        # Check as subdir of run_dir
+        subpath = os.path.join(rd, run_id)
+        if os.path.isdir(subpath):
+            return subpath
+        # Check current dir's run.json
+        rj = os.path.join(rd, "hotcb.run.json")
+        if os.path.exists(rj):
+            try:
+                with open(rj) as f:
+                    meta = json.load(f)
+                if meta.get("run_id") == run_id:
+                    return rd
+            except Exception:
+                pass
+        # Check active run dir
+        if _launcher._active_run_dir:
+            if os.path.basename(_launcher._active_run_dir.rstrip("/")) == run_id:
+                return _launcher._active_run_dir
+        return None
+
     @router.get("/runs/{run_id}/metrics")
     async def get_run_metrics(run_id: str, last_n: int = 2000):
         """Get metrics from a specific run by its ID."""
-        run_dir = _launcher._run_dir
-        parent_dir = os.path.dirname(run_dir.rstrip("/"))
-
-        # Find the run directory
-        target_dir = None
-        # Check current run_dir
-        run_json = os.path.join(run_dir, "hotcb.run.json")
-        if os.path.exists(run_json):
-            with open(run_json) as f:
-                meta = json.load(f)
-            if meta.get("run_id") == run_id:
-                target_dir = run_dir
-
-        # Check history
-        if not target_dir and parent_dir:
-            history_path = os.path.join(parent_dir, "hotcb.runs.jsonl")
-            if os.path.exists(history_path):
-                with open(history_path) as f:
-                    for line in f:
-                        try:
-                            entry = json.loads(line.strip())
-                            if entry.get("run_id") == run_id and entry.get("run_dir"):
-                                target_dir = entry["run_dir"]
-                                break
-                        except Exception:
-                            pass
+        target_dir = _find_run_dir(run_id)
 
         if not target_dir:
             return JSONResponse(status_code=404, content={"error": f"Run {run_id} not found"})
@@ -527,29 +522,7 @@ def create_router(launcher: Optional[TrainingLauncher] = None) -> Any:
     @router.get("/runs/{run_id}/applied")
     async def get_run_applied(run_id: str, last_n: int = 200):
         """Get applied mutations from a specific run by its ID."""
-        run_dir = _launcher._run_dir
-        parent_dir = os.path.dirname(run_dir.rstrip("/"))
-
-        target_dir = None
-        run_json = os.path.join(run_dir, "hotcb.run.json")
-        if os.path.exists(run_json):
-            with open(run_json) as f:
-                meta = json.load(f)
-            if meta.get("run_id") == run_id:
-                target_dir = run_dir
-
-        if not target_dir and parent_dir:
-            history_path = os.path.join(parent_dir, "hotcb.runs.jsonl")
-            if os.path.exists(history_path):
-                with open(history_path) as f:
-                    for line in f:
-                        try:
-                            entry = json.loads(line.strip())
-                            if entry.get("run_id") == run_id and entry.get("run_dir"):
-                                target_dir = entry["run_dir"]
-                                break
-                        except Exception:
-                            pass
+        target_dir = _find_run_dir(run_id)
 
         if not target_dir:
             return JSONResponse(status_code=404, content={"error": f"Run {run_id} not found"})

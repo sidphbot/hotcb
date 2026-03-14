@@ -160,16 +160,16 @@ class TestReplayReproduces:
         assert len(replay_applied) >= 1
 
 
-class TestLossStateMutation:
-    def test_loss_state_changed(self, tmp_path):
+class TestMutableStateMutation:
+    def test_mutable_state_changed(self, tmp_path):
         run_dir = str(tmp_path / "run_loss")
         os.makedirs(run_dir, exist_ok=True)
 
         _write_commands(run_dir, {"module": "loss", "op": "set_params", "id": "main", "params": {"distill_w": 0.5}})
 
-        loss_state = {"weights": {}, "terms": {}, "ramps": {}}
+        mutable_state = {"weights": {}, "terms": {}, "ramps": {}}
         kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
-        adapter = HotCBLightning(kernel=kernel, loss_state=loss_state)
+        adapter = HotCBLightning(kernel=kernel, mutable_state=mutable_state)
         model = TinyModel()
 
         trainer = pl.Trainer(
@@ -179,7 +179,7 @@ class TestLossStateMutation:
         )
         trainer.fit(model)
 
-        assert loss_state["weights"]["distill"] == 0.5
+        assert mutable_state["weights"]["distill"] == 0.5
 
         ledger = _read_ledger(run_dir)
         loss_applied = [e for e in ledger if e.get("module") == "loss" and e.get("decision") == "applied"]

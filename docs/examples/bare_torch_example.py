@@ -12,7 +12,7 @@ from hotcb.kernel import HotKernel
 def main():
     model = torch.nn.Linear(16, 1)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_state = {"weights": {"mse": 1.0}, "terms": {}, "ramps": {}}
+    mutable_state = {"weights": {"mse": 1.0}, "terms": {}, "ramps": {}}
 
     kernel = HotKernel(run_dir="runs/exp-001", debounce_steps=1)
 
@@ -25,7 +25,7 @@ def main():
         for step, (x, y) in enumerate(loader):
             optimizer.zero_grad()
             pred = model(x)
-            w = loss_state["weights"].get("mse", 1.0)
+            w = mutable_state["weights"].get("mse", 1.0)
             loss = w * torch.nn.functional.mse_loss(pred, y)
             loss.backward()
             optimizer.step()
@@ -38,7 +38,7 @@ def main():
                 "model": model,
                 "optimizer": optimizer,
                 "loss": loss,
-                "loss_state": loss_state,
+                "mutable_state": mutable_state,
                 "log": print,
             }
             kernel.apply(env, events=["train_step_end"])

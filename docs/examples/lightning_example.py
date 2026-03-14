@@ -15,12 +15,12 @@ class TinyModel(pl.LightningModule):
     def __init__(self):
         super().__init__()
         self.net = torch.nn.Linear(16, 1)
-        self.loss_state = {"weights": {"mse": 1.0}, "terms": {}, "ramps": {}}
+        self.mutable_state = {"weights": {"mse": 1.0}, "terms": {}, "ramps": {}}
 
     def training_step(self, batch, batch_idx):
         x, y = batch
         pred = self.net(x)
-        w = self.loss_state["weights"].get("mse", 1.0)
+        w = self.mutable_state["weights"].get("mse", 1.0)
         return w * torch.nn.functional.mse_loss(pred, y)
 
     def configure_optimizers(self):
@@ -30,7 +30,7 @@ class TinyModel(pl.LightningModule):
 def main():
     model = TinyModel()
     kernel = HotKernel(run_dir="runs/exp-001", debounce_steps=1)
-    hotcb_cb = HotCBLightning(kernel, loss_state=model.loss_state)
+    hotcb_cb = HotCBLightning(kernel, mutable_state=model.mutable_state)
 
     dataset = torch.utils.data.TensorDataset(
         torch.randn(200, 16), torch.randn(200, 1)
