@@ -226,7 +226,9 @@ class RecipePlayer:
             self._recipe_mtime = safe_mtime(recipe_path)
         except FileNotFoundError:
             self._entries = []
-        except Exception:
+        except Exception as exc:
+            import logging
+            logging.getLogger("hotcb.recipe").warning("Failed to load recipe %s: %s", recipe_path, exc)
             self._entries = []
 
         # Apply overlay if adjust file exists

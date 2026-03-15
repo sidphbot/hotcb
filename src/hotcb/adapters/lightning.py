@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Optional
 import pytorch_lightning as pl
 
 from hotcb.kernel import HotKernel
-from hotcb.capabilities import TrainingCapabilities, validate_loss_state
+from hotcb.capabilities import TrainingCapabilities, validate_mutable_state
+from hotcb.actuators import optimizer_actuators, mutable_state as make_mutable_state
 
 
 class HotCBLightning(pl.Callback):
@@ -13,7 +14,7 @@ class HotCBLightning(pl.Callback):
     PyTorch Lightning adapter for hotcb.
 
     Connects Lightning hooks to HotKernel, exposing optimizer, scheduler,
-    and loss_state in the env dict for hotopt/hotloss modules.
+    and mutable_state in the env dict for hotopt/hotloss modules.
 
     Multi-optimizer support
     -----------------------
@@ -35,13 +36,13 @@ class HotCBLightning(pl.Callback):
         kernel: HotKernel,
         train_events: Optional[List[str]] = None,
         val_events: Optional[List[str]] = None,
-        loss_state: Optional[Dict[str, Any]] = None,
+        mutable_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         self.kernel = kernel
         self.train_events = train_events or ["train_batch_end"]
         self.val_events = val_events or ["val_batch_end"]
-        self._loss_state = loss_state
+        self._mutable_state = mutable_state
         self._capabilities: Optional[TrainingCapabilities] = None
 
     # -- lifecycle hooks ---------------------------------------------------
@@ -50,8 +51,64 @@ class HotCBLightning(pl.Callback):
         self._capabilities = self._detect_capabilities(trainer, pl_module)
         if self.kernel.run_dir:
             self._capabilities.save(self.kernel.run_dir)
+        # Wire MutableState to kernel if not already set
+        self._wire_mutable_state(trainer, pl_module)
         env = self._env(trainer, pl_module, phase="fit_start")
         self.kernel.apply(env, events=["fit_start"])
+
+    def _wire_mutable_state(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        """Discover or create MutableState and wire it to the kernel."""
+        from hotcb.actuators.state import MutableState
+        from hotcb.actuators import loss_actuators
+
+        # 1. If kernel already has a MutableState, nothing to do
+        if self.kernel._mutable_state is not None:
+            return
+
+        # 2. Check if pl_module.mutable_state is already a MutableState object
+        ms_attr = getattr(pl_module, "mutable_state", None)
+        if isinstance(ms_attr, MutableState):
+            # Merge optimizer actuators into it if optimizers are available
+            try:
+                optimizers = trainer.optimizers or []
+                if optimizers:
+                    from hotcb.actuators.state import MutableState as MS
+                    opt_acts = optimizer_actuators(optimizers[0])
+                    # Combine: existing loss/custom actuators + auto-discovered optimizer actuators
+                    all_acts = list(ms_attr._actuators.values()) + opt_acts
+                    self.kernel._mutable_state = make_mutable_state(all_acts)
+                else:
+                    self.kernel._mutable_state = ms_attr
+            except Exception:
+                self.kernel._mutable_state = ms_attr
+            return
+
+        # 3. Check if explicit _mutable_state passed to adapter is a MutableState
+        if isinstance(self._mutable_state, MutableState):
+            self.kernel._mutable_state = self._mutable_state
+            return
+
+        # 4. Old dict format: auto-wrap with loss_actuators + optimizer_actuators
+        all_acts = []
+        try:
+            optimizers = trainer.optimizers or []
+            if optimizers:
+                all_acts.extend(optimizer_actuators(optimizers[0]))
+        except Exception:
+            pass
+
+        # Auto-wrap old mutable_state dict as loss actuators
+        ls = self._resolve_mutable_state_dict(pl_module)
+        if ls is not None:
+            weights = ls.get("weights", {})
+            if weights:
+                try:
+                    all_acts.extend(loss_actuators(weights))
+                except Exception:
+                    pass
+
+        if all_acts:
+            self.kernel._mutable_state = make_mutable_state(all_acts)
 
     def on_train_batch_end(
         self,
@@ -130,14 +187,20 @@ class HotCBLightning(pl.Callback):
         if not auto_opt and accum == 1:
             accum = getattr(pl_module, "_grad_accum", 1) or 1
 
-        # Loss state
+        # Mutable state
         ls_detected = False
         ls_keys: list[str] = []
-        ls = self._resolve_loss_state(pl_module)
-        if ls is not None:
+        from hotcb.actuators.state import MutableState
+        ms_attr = getattr(pl_module, "mutable_state", None)
+        if isinstance(ms_attr, MutableState):
             ls_detected = True
-            weights = ls.get("weights", {})
-            ls_keys = list(weights.keys())
+            ls_keys = ms_attr.keys()
+        else:
+            ls = self._resolve_mutable_state_dict(pl_module)
+            if ls is not None:
+                ls_detected = True
+                weights = ls.get("weights", {})
+                ls_keys = list(weights.keys())
 
         # Grad clip
         clip_val = None
@@ -158,8 +221,8 @@ class HotCBLightning(pl.Callback):
             scheduler_types=tuple(sched_types),
             grad_accumulation_steps=accum,
             automatic_optimization=auto_opt,
-            loss_state_detected=ls_detected,
-            loss_state_keys=tuple(ls_keys),
+            mutable_state_detected=ls_detected,
+            mutable_state_keys=tuple(ls_keys),
             grad_clip_value=clip_val,
             grad_clip_wired=clip_wired,
         )
@@ -176,7 +239,7 @@ class HotCBLightning(pl.Callback):
         env: Dict[str, Any] = {
             "framework": "lightning",
             "phase": phase,
-            "step": int(getattr(trainer, "global_step", 0)),
+            "step": int(getattr(pl_module, "_opt_step_count", 0) or getattr(trainer, "global_step", 0)),
             "epoch": int(getattr(trainer, "current_epoch", 0)),
             "model": pl_module,
             "trainer": trainer,
@@ -267,10 +330,10 @@ class HotCBLightning(pl.Callback):
         except Exception:
             pass
 
-        # -- loss_state (explicit > auto-detected from pl_module) --
-        ls = self._resolve_loss_state(pl_module)
+        # -- mutable_state (explicit > auto-detected from pl_module) --
+        ls = self._resolve_mutable_state(pl_module)
         if ls is not None:
-            env["loss_state"] = ls
+            env["mutable_state"] = ls
 
         # -- grad accumulation detection --
         batch_idx = extra.get("batch_idx")
@@ -330,17 +393,36 @@ class HotCBLightning(pl.Callback):
 
     # -- helpers -----------------------------------------------------------
 
-    def _resolve_loss_state(self, pl_module: pl.LightningModule) -> Optional[Dict[str, Any]]:
-        """Resolve loss_state: explicit > pl_module attribute."""
-        if self._loss_state is not None:
-            valid, normalized = validate_loss_state(self._loss_state)
-            if valid:
-                return normalized if normalized is not self._loss_state else self._loss_state
+    def _resolve_mutable_state(self, pl_module: pl.LightningModule) -> Optional[Dict[str, Any]]:
+        """Resolve mutable_state for env dict. Handles both new MutableState and old dicts."""
+        from hotcb.actuators.state import MutableState
+        # New MutableState objects are wired to kernel directly, not put in env as dict
+        ms_attr = getattr(pl_module, "mutable_state", None)
+        if isinstance(ms_attr, MutableState):
+            return None  # handled by kernel._mutable_state
+        # Fall through to old dict path
+        return self._resolve_mutable_state_dict(pl_module)
 
+    def _resolve_mutable_state_dict(self, pl_module: pl.LightningModule) -> Optional[Dict[str, Any]]:
+        """Resolve old-style mutable_state dict: explicit > pl_module attribute."""
+        if self._mutable_state is not None and isinstance(self._mutable_state, dict):
+            valid, normalized = validate_mutable_state(self._mutable_state)
+            if valid:
+                return normalized if normalized is not self._mutable_state else self._mutable_state
+
+        if hasattr(pl_module, "mutable_state"):
+            obj = pl_module.mutable_state
+            if isinstance(obj, dict):
+                valid, _ = validate_mutable_state(obj)
+                if valid:
+                    return obj
+
+        # Fallback: check loss_state (legacy name)
         if hasattr(pl_module, "loss_state"):
             obj = pl_module.loss_state
-            valid, _ = validate_loss_state(obj)
-            if valid:
-                return obj  # return original ref so mutations are visible
+            if isinstance(obj, dict):
+                valid, _ = validate_mutable_state(obj)
+                if valid:
+                    return obj
 
         return None

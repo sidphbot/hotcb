@@ -58,19 +58,23 @@ def test_jsonl_partial_line(run_dir, make_env, read_ledger):
     assert isinstance(ledger, list)  # no crash
 
 
-def test_read_new_jsonl_partial_line_raises():
-    """read_new_jsonl itself must raise json.JSONDecodeError on malformed JSON."""
+def test_read_new_jsonl_skips_malformed_lines():
+    """read_new_jsonl should skip malformed JSON lines instead of raising."""
     import tempfile
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         f.write(json.dumps({"module": "opt", "op": "enable"}) + "\n")
-        f.write('{"module":"opt"\n')
+        f.write('{"module":"opt"\n')  # malformed
+        f.write(json.dumps({"module": "loss", "op": "set_params"}) + "\n")
         path = f.name
 
     try:
         cursor = FileCursor(path=path, offset=0)
-        with pytest.raises(json.JSONDecodeError):
-            read_new_jsonl(cursor)
+        records, _ = read_new_jsonl(cursor)
+        # Should get 2 valid records, malformed line skipped
+        assert len(records) == 2
+        assert records[0]["module"] == "opt"
+        assert records[1]["module"] == "loss"
     finally:
         os.unlink(path)
 

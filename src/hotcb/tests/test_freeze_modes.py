@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hotcb.actuators import optimizer_actuators, mutable_state
 from hotcb.kernel import HotKernel
 
 
@@ -120,9 +121,9 @@ class TestFreezeReplay:
         )
         write_freeze(mode="replay", recipe_path=recipe_path)
 
-        kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
-
         opt = _make_optimizer(lr=1e-4)
+        ms = mutable_state(optimizer_actuators(opt))
+        kernel = HotKernel(run_dir=run_dir, debounce_steps=1, mutable_state=ms)
 
         # Append an external conflicting opt command
         write_commands({"module": "opt", "op": "set_params", "id": "main", "params": {"lr": 9e-4}})
@@ -180,8 +181,9 @@ class TestFreezeReplayAdjusted:
 
         write_freeze(mode="replay_adjusted", recipe_path=recipe_path, adjust_path=adjust_path)
 
-        kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
         opt = _make_optimizer(lr=1e-4)
+        ms = mutable_state(optimizer_actuators(opt))
+        kernel = HotKernel(run_dir=run_dir, debounce_steps=1, mutable_state=ms)
 
         for step in range(1, 6):
             env = make_env(step=step, optimizer=opt)
@@ -211,8 +213,9 @@ class TestUnfreeze:
         """
         write_freeze(mode="prod")
 
-        kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
         opt = _make_optimizer(lr=1e-4)
+        ms = mutable_state(optimizer_actuators(opt))
+        kernel = HotKernel(run_dir=run_dir, debounce_steps=1, mutable_state=ms)
 
         # Step 1: external opt command -- should be ignored
         write_commands({"module": "opt", "op": "set_params", "id": "main", "params": {"lr": 5e-4}})

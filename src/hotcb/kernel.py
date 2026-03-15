@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 import traceback as tb_mod
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .freeze import FreezeState
 from .ledger import append_ledger
 from .ops import HotOp, command_to_hotop
 from .recipe import RecipePlayer
 from .util import FileCursor, read_new_jsonl, safe_mtime
-from .modules import CallbackModule, HotOptController, HotLossController, HotTuneController
+from .modules.cb.module import CallbackModule
+from .modules.tune import HotTuneController
 from .modules.result import ModuleResult
 from .actuators.base import BaseActuator
+from .actuators.state import MutableState
 from . import config as hotcb_config
 
 
@@ -35,6 +38,7 @@ class HotKernel:
         log_path: Optional[str] = None,
         tune_recipe_path: Optional[str] = None,
         metrics_collector: Optional[object] = None,
+        mutable_state: Optional[MutableState] = None,
     ) -> None:
         self.run_dir = run_dir
         self.debounce_steps = max(1, int(debounce_steps))
@@ -51,6 +55,7 @@ class HotKernel:
         self.sources_dir = os.path.join(run_dir, "hotcb.sources")
         self.log_path = log_path or os.path.join(run_dir, "hotcb.log")
         self._metrics_collector = metrics_collector
+        self._mutable_state = mutable_state
 
         self._freeze_state = FreezeState.load(self.freeze_path)
         self._recipe_player = RecipePlayer(
@@ -62,11 +67,10 @@ class HotKernel:
         self._cmd_cursor = FileCursor(path=self.commands_path, offset=0)
 
         self._actuators: Dict[str, BaseActuator] = {}
+        self._actuators_written = False  # track if we've written the actuator description file
 
         self.modules: Dict[str, object] = {
             "cb": CallbackModule(auto_disable_on_error=auto_disable_on_error, log_path=self.log_path, source_capture_dir=self.sources_dir),
-            "opt": HotOptController(auto_disable_on_error=auto_disable_on_error),
-            "loss": HotLossController(auto_disable_on_error=auto_disable_on_error),
             "tune": HotTuneController(
                 auto_disable_on_error=auto_disable_on_error,
                 run_dir=run_dir,
@@ -91,21 +95,30 @@ class HotKernel:
         tune = self.modules.get("tune")
         if tune is not None and hasattr(tune, "register_actuator"):
             tune.register_actuator(name, actuator)
-        # Wire actuator validation into the corresponding module
-        if name == "opt":
-            opt_mod = self.modules.get("opt")
-            if opt_mod is not None and hasattr(opt_mod, "set_actuator"):
-                opt_mod.set_actuator(actuator)
-        elif name == "loss":
-            loss_mod = self.modules.get("loss")
-            if loss_mod is not None and hasattr(loss_mod, "set_actuator"):
-                loss_mod.set_actuator(actuator)
 
     def get_actuator(self, name: str) -> Optional[BaseActuator]:
         return self._actuators.get(name)
 
     def list_actuators(self) -> Dict[str, BaseActuator]:
         return dict(self._actuators)
+
+    def _write_actuator_descriptions(self) -> None:
+        """Write actuator descriptions to hotcb.actuators.json for server consumption.
+
+        This bridges the MutableState from the training process to the dashboard
+        server via filesystem IPC.  Called once after first apply() and whenever
+        actuators change.
+        """
+        if self._mutable_state is None:
+            return
+        try:
+            descs = self._mutable_state.describe_all()
+            path = os.path.join(self.run_dir, "hotcb.actuators.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"controls": descs}, f)
+            self._actuators_written = True
+        except Exception:
+            pass  # never crash training
 
     def _should_poll(self) -> bool:
         if self.poll_interval_sec > 0.0:
@@ -151,6 +164,12 @@ class HotKernel:
         current_step = int(env.get("step", self._step_counter) or self._step_counter)
         events = events or []
         default_event = events[0] if events else "unknown"
+
+        # Write actuator descriptions on first step so the dashboard can discover controls
+        if not self._actuators_written and self._mutable_state is not None:
+            if self._step_counter == 1:
+                self._mutable_state.initialize(env)
+            self._write_actuator_descriptions()
 
         pending: List[Tuple[HotOp, str]] = []
         if self._should_poll():
@@ -247,11 +266,11 @@ class HotKernel:
             )
 
     def _apply_single(self, op: HotOp, env: dict, event: str, step: int) -> None:
-        # freeze enforcement
-        if op.source == "external" and self._freeze_state.mode == "prod" and op.module in {"cb", "opt", "loss", "tune"}:
+        # freeze enforcement — all non-core modules are frozen
+        if op.source == "external" and self._freeze_state.mode == "prod" and op.module != "core":
             self._write_ledger(op, event, step, decision="ignored_freeze", payload=op.to_dict(), env=env)
             return
-        if op.source == "external" and self._freeze_state.mode in {"replay", "replay_adjusted"} and op.module in {"cb", "opt", "loss", "tune"}:
+        if op.source == "external" and self._freeze_state.mode in {"replay", "replay_adjusted"} and op.module != "core":
             self._write_ledger(op, event, step, decision="ignored_replay", payload=op.to_dict(), env=env)
             return
 
@@ -260,25 +279,122 @@ class HotKernel:
             self._write_ledger(op, event, step, decision=decision, error=error, payload=payload, env=env)
             return
 
+        # cb and tune have dedicated module controllers
         mod = self.modules.get(op.module)
-        if mod is None:
-            self._write_ledger(op, event, step, decision="failed", error=f"unknown_module:{op.module}", payload=op.to_dict(), env=env)
+        if mod is not None:
+            result: Optional[ModuleResult] = None
+            try:
+                if hasattr(mod, "apply_op"):
+                    result = mod.apply_op(op, env)
+            except Exception as e:  # pragma: no cover - defensive
+                self._write_ledger(op, event, step, decision="failed", error=str(e), payload=op.to_dict(), env=env, traceback_str=tb_mod.format_exc())
+                return
+
+            if result is None:
+                self._write_ledger(op, event, step, decision="failed", error="no_result", payload=op.to_dict(), env=env)
+                return
+
+            payload = result.payload if result.payload is not None else op.to_dict()
+            self._write_ledger(op, event, step, decision=result.decision, error=result.error, payload=payload, notes=result.notes, env=env, traceback_str=result.traceback)
             return
 
-        result: Optional[ModuleResult] = None
-        try:
-            if hasattr(mod, "apply_op"):
-                result = mod.apply_op(op, env)
-        except Exception as e:  # pragma: no cover - defensive
-            self._write_ledger(op, event, step, decision="failed", error=str(e), payload=op.to_dict(), env=env, traceback_str=tb_mod.format_exc())
+        # DEFAULT STREAM: opt, loss, or any custom module -> route through MutableState
+        self._apply_default_stream(op, env, event, step)
+
+    # ------------------------------------------------------------------
+    # Default stream: route through MutableState
+    # ------------------------------------------------------------------
+
+    def _apply_default_stream(self, op: HotOp, env: dict, event: str, step: int) -> None:
+        """Route opt/loss/custom ops through MutableState."""
+        if self._mutable_state is None:
+            self._write_ledger(
+                op, event, step, decision="failed",
+                error="no_mutable_state", payload=op.to_dict(), env=env,
+            )
             return
 
-        if result is None:
-            self._write_ledger(op, event, step, decision="failed", error="no_result", payload=op.to_dict(), env=env)
+        # Handle enable/disable
+        if op.op in ("enable", "disable"):
+            key = self._resolve_param_key(op)
+            if key:
+                if op.op == "enable":
+                    self._mutable_state.enable(key)
+                else:
+                    self._mutable_state.disable(key)
+                self._write_ledger(
+                    op, event, step, decision="applied",
+                    payload=op.to_dict(), env=env,
+                )
+            else:
+                self._write_ledger(
+                    op, event, step, decision="failed",
+                    error="missing_param_key", payload=op.to_dict(), env=env,
+                )
             return
 
-        payload = result.payload if result.payload is not None else op.to_dict()
-        self._write_ledger(op, event, step, decision=result.decision, error=result.error, payload=payload, notes=result.notes, env=env, traceback_str=result.traceback)
+        if op.op == "set_params":
+            applied_any = False
+            errors: List[str] = []
+            applied_params: Dict[str, Any] = {}
+
+            for key, value in self._extract_param_pairs(op):
+                result = self._mutable_state.apply(key, value, env, step)
+                if result.success:
+                    applied_any = True
+                    applied_params[key] = value
+                else:
+                    errors.append(f"{key}: {result.error}")
+
+            if applied_any:
+                self._write_ledger(
+                    op, event, step, decision="applied",
+                    payload=applied_params, env=env,
+                    notes="; ".join(errors) if errors else None,
+                )
+                # Update actuator file so dashboard sees new current values
+                self._write_actuator_descriptions()
+            elif errors:
+                self._write_ledger(
+                    op, event, step, decision="failed",
+                    error="; ".join(errors), payload=op.to_dict(), env=env,
+                )
+            else:
+                self._write_ledger(
+                    op, event, step, decision="failed",
+                    error="no_params", payload=op.to_dict(), env=env,
+                )
+            return
+
+        self._write_ledger(
+            op, event, step, decision="ignored",
+            notes=f"unknown_op:{op.op}", payload=op.to_dict(), env=env,
+        )
+
+    def _resolve_param_key(self, op: HotOp) -> Optional[str]:
+        """Extract param key from op for enable/disable."""
+        params = op.params or {}
+        return params.get("key") or op.id
+
+    def _extract_param_pairs(self, op: HotOp):
+        """Yield (key, value) pairs from a set_params op.
+
+        Supports both new format: {"key": "lr", "value": 1e-3}
+        and direct params: {"lr": 1e-3, "weight_decay": 1e-4}
+        """
+        params = op.params or {}
+
+        # New format: explicit key+value
+        if "key" in params and "value" in params:
+            yield params["key"], params["value"]
+            return
+
+        # Direct params format: each key-value pair is a param to set
+        # Skip non-param keys like "opt_idx", "group", "groups", "id"
+        skip_keys = {"opt_idx", "group", "groups", "id"}
+        for k, v in params.items():
+            if k not in skip_keys and v is not None:
+                yield k, v
 
     def _apply_core_op(self, op: HotOp) -> Tuple[str, Optional[str], Optional[dict]]:
         if op.op == "freeze":
@@ -337,6 +453,7 @@ class HotKernel:
             "id": op.id,
             "source": op.source,
             "decision": decision,
+            "params": op.params,
             "payload": payload,
             "error": error,
             "traceback": traceback_str,

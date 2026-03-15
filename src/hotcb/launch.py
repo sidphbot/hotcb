@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -312,6 +313,15 @@ def launch(
         run_dir = tempfile.mkdtemp(prefix="hotcb_run_")
     _seed_run_dir(run_dir)
 
+    w = sys.stderr.write
+    w("\n")
+    w("  hotcb launch\n")
+    w(f"  autopilot: {autopilot}\n")
+    if key_metric:
+        w(f"  key metric: {key_metric}\n")
+    w(f"  dashboard: http://{host}:{port}\n")
+    w("\n")
+
     # Write AI state if AI mode
     if autopilot in ("ai_suggest", "ai_auto"):
         ai_state = {
@@ -423,7 +433,7 @@ def launch(
             try:
                 from .server.app import create_app
                 import uvicorn
-                app = create_app(run_dir)
+                app = create_app(run_dir, demo_mode=True)
 
                 # Configure autopilot mode after app is created
                 ap_engine = app.state.autopilot_engine

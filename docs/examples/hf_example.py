@@ -39,7 +39,7 @@ def main():
     hotcb_cb = HotCBHFCallback(
         kernel,
         resolve_optimizer=lambda: trainer_ref.get("trainer") and trainer_ref["trainer"].optimizer,
-        loss_state={"weights": {"ce": 1.0}, "terms": {}, "ramps": {}},
+        mutable_state={"weights": {"ce": 1.0}, "terms": {}, "ramps": {}},
     )
 
     args = TrainingArguments(

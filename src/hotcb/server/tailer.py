@@ -119,7 +119,11 @@ class JsonlTailer:
     async def _poll_target(self, target: TailTarget) -> List[dict]:
         """Read new records from one target and dispatch to subscribers."""
         try:
-            records, new_cursor = read_new_jsonl(target.cursor)
+            # Run blocking file I/O in a thread to avoid blocking the event loop
+            loop = asyncio.get_running_loop()
+            records, new_cursor = await loop.run_in_executor(
+                None, read_new_jsonl, target.cursor
+            )
             target.cursor = new_cursor
         except Exception as e:
             log.warning("Tailer error on %s: %s", target.name, e)

@@ -11,10 +11,17 @@ from typing import Any, Iterable, List, Optional, Tuple
 class FileCursor:
     """
     Tracks incremental read state for an append-only file (JSONL).
+
+    ``last_size`` stores the file size at the time of the last read,
+    enabling proper truncation detection: if the file shrinks, the
+    cursor resets and the ``truncated`` flag is set so callers can
+    distinguish "new file" from "appended data".
     """
 
     path: str
     offset: int = 0
+    last_size: int = 0
+    truncated: bool = False
 
 
 def ensure_dir(path: str) -> None:
@@ -35,15 +42,31 @@ def safe_mtime(path: str) -> float:
 def read_new_jsonl(cursor: FileCursor, max_lines: int = 10_000) -> Tuple[List[dict], FileCursor]:
     """
     Read newly appended JSONL records starting from cursor.offset.
+
+    Handles file truncation safely: if the file shrinks (e.g. ``open(f, 'w')``
+    clears it), the cursor resets to byte 0 and reads the new content.  The
+    returned cursor has ``truncated=True`` so callers can distinguish a fresh
+    file from an append to an existing one.
+
+    When the file is *overwritten* (truncated then written with fewer bytes
+    than before), the cursor detects the shrink via ``last_size`` and resets
+    to 0 — reading only the new content, not stale leftovers.
     """
     if not os.path.exists(cursor.path):
         return [], cursor
 
-    # Detect file truncation (reset)
     file_size = os.path.getsize(cursor.path)
     effective_offset = cursor.offset
-    if file_size < effective_offset:
-        effective_offset = 0  # file was truncated, start from beginning
+    was_truncated = False
+
+    # Detect truncation: file shrank since our last read
+    if file_size < cursor.last_size:
+        effective_offset = 0
+        was_truncated = True
+    # Also catch: cursor past EOF (file overwritten with shorter content)
+    elif file_size < effective_offset:
+        effective_offset = 0
+        was_truncated = True
 
     out: List[dict] = []
     with open(cursor.path, "r", encoding="utf-8") as f:
@@ -55,16 +78,30 @@ def read_new_jsonl(cursor: FileCursor, max_lines: int = 10_000) -> Tuple[List[di
             s = line.strip()
             if not s:
                 continue
-            out.append(json.loads(s))
+            try:
+                out.append(json.loads(s))
+            except json.JSONDecodeError:
+                continue
         new_offset = f.tell()
-    return out, FileCursor(path=cursor.path, offset=new_offset)
+    return out, FileCursor(
+        path=cursor.path,
+        offset=new_offset,
+        last_size=file_size,
+        truncated=was_truncated,
+    )
 
 
 def append_jsonl(path: str, obj: dict) -> None:
-    """Append a single JSON object to a JSONL file (creates parent dirs)."""
+    """Append a single JSON object as a line to a JSONL file (with file locking)."""
+    import fcntl
     ensure_dir(os.path.dirname(path))
+    line = json.dumps(sanitize_floats(obj), ensure_ascii=False) + "\n"
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(line)
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def dedupe_keep_order(items: Iterable[Any]) -> List[Any]:
@@ -80,6 +117,20 @@ def dedupe_keep_order(items: Iterable[Any]) -> List[Any]:
         seen_ids.add(k)
         out.append(x)
     return out
+
+
+def sanitize_floats(obj: Any) -> Any:
+    """Replace NaN/inf/-inf with None recursively in dicts/lists for JSON safety."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_floats(v) for v in obj]
+    return obj
 
 
 def now() -> float:

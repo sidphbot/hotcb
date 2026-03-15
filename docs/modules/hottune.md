@@ -39,18 +39,22 @@ hottune consists of five layers:
 ```python
 from hotcb import HotKernel
 from hotcb.adapters.lightning import HotCBLightning
-from hotcb.actuators import OptimizerActuator, LossStateActuator
+from hotcb.actuators import optimizer_actuators, loss_actuators, mutable_state
+
+# Create MutableState with all controllable params
+loss_weights = {"weight_a": 1.0, "weight_b": 0.5}
+ms = mutable_state(
+    optimizer_actuators(optimizer) + loss_actuators(loss_weights)
+)
 
 kernel = HotKernel(
     run_dir="runs/exp1",
     tune_recipe_path="tune_recipe.yaml",  # optional
+    mutable_state=ms,
 )
 
-# Register actuators so tune knows what it can mutate
-kernel.register_actuator("opt", OptimizerActuator())
-kernel.register_actuator("loss", LossStateActuator())
-
-trainer = pl.Trainer(callbacks=[HotCBLightning(kernel, loss_state=model.loss_state)])
+# Adapter auto-discovers optimizer actuators if not already in MutableState
+trainer = pl.Trainer(callbacks=[HotCBLightning(kernel)])
 trainer.fit(model, datamodule=dm)
 ```
 
@@ -64,10 +68,10 @@ hotcb --dir runs/exp1 tune enable --mode active
 
 ```python
 from hotcb import HotKernel
-from hotcb.actuators import OptimizerActuator
+from hotcb.actuators import optimizer_actuators, mutable_state
 
-kernel = HotKernel(run_dir="runs/exp1")
-kernel.register_actuator("opt", OptimizerActuator())
+ms = mutable_state(optimizer_actuators(optimizer))
+kernel = HotKernel(run_dir="runs/exp1", mutable_state=ms)
 
 for epoch in range(num_epochs):
     for step, batch in enumerate(dl):
@@ -106,23 +110,21 @@ Actuators are the bridge between the tuner and live training state.
 
 ### Built-in actuators
 
-**OptimizerActuator** -- mutates optimizer param groups:
+**`optimizer_actuators(optimizer)`** -- creates per-param actuators for optimizer:
 
-| Op | Description |
-|---|---|
-| `lr_mult` | Multiplicative LR change |
-| `lr_set` | Absolute LR set |
-| `wd_mult` | Multiplicative weight decay change |
-| `wd_set` | Absolute weight decay set |
-| `betas_set` | Set Adam betas |
+| Param | Type | Description |
+|---|---|---|
+| `lr` | `LOG_FLOAT` | Learning rate (log-scale) |
+| `weight_decay` | `LOG_FLOAT` | Weight decay (log-scale) |
+| `betas` | `TUPLE` | Adam betas |
 
-**LossStateActuator** -- mutates loss weights:
+**`loss_actuators(weights_dict)`** -- creates per-key actuators for loss weights:
 
-| Op | Description |
-|---|---|
-| `set` | Set weight to absolute value |
-| `mult` | Multiply weight by value |
-| `delta` | Add value to weight |
+| Param | Type | Description |
+|---|---|---|
+| Each key | `FLOAT` | Set weight to absolute value |
+
+Each `HotcbActuator` has a state machine: `INIT` -> `UNTOUCHED` -> `UNVERIFIED` -> `VERIFIED` (or `DISABLED`).
 
 ### Custom actuators
 

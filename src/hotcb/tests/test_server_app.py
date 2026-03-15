@@ -184,3 +184,200 @@ class TestRESTEndpoints:
         records = r.json()["records"]
         assert len(records) == 1
         assert records[0]["module"] == "opt"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Immutable run_dir tests
+# ---------------------------------------------------------------------------
+
+
+class TestImmutableRunDir:
+    """Phase 5: run_dir is set once at create_app() and never changes."""
+
+    def test_no_app_state_run_dir_attribute(self, populated_dir):
+        """app.state should not have a mutable run_dir; use config.run_dir."""
+        app = create_app(populated_dir, poll_interval=60)
+        # app.state.run_dir should NOT be set (removed in Phase 5)
+        assert not hasattr(app.state, "run_dir"), (
+            "app.state.run_dir should not exist; use app.state.config.run_dir"
+        )
+
+    def test_config_run_dir_is_set(self, populated_dir):
+        """app.state.config.run_dir should be set to the resolved run_dir."""
+        app = create_app(populated_dir, poll_interval=60)
+        assert hasattr(app.state, "config")
+        assert app.state.config.run_dir == populated_dir
+
+    def test_endpoints_use_config_run_dir(self, populated_dir):
+        """All endpoints should read from config.run_dir."""
+        from starlette.testclient import TestClient
+        app = create_app(populated_dir, poll_interval=60)
+        client = TestClient(app)
+
+        # /api/health returns the config run_dir
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        assert r.json()["run_dir"] == populated_dir
+
+        # /api/status returns data from config run_dir
+        r = client.get("/api/status")
+        assert r.status_code == 200
+        assert r.json()["run_dir"] == populated_dir
+
+        # /api/metrics/history returns data from config run_dir
+        r = client.get("/api/metrics/history?last_n=3")
+        assert r.status_code == 200
+        assert len(r.json()["records"]) == 3
+
+    def test_config_endpoint_returns_run_dir(self, populated_dir):
+        """GET /api/config should include the immutable run_dir."""
+        from starlette.testclient import TestClient
+        app = create_app(populated_dir, poll_interval=60)
+        client = TestClient(app)
+
+        r = client.get("/api/config")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["run_dir"] == populated_dir
+
+    def test_discover_runs_reads_only(self, populated_dir):
+        """/api/runs/discover should scan read-only, never mutate run_dir."""
+        from starlette.testclient import TestClient
+        app = create_app(populated_dir, poll_interval=60)
+        client = TestClient(app)
+
+        r = client.get("/api/runs/discover")
+        assert r.status_code == 200
+        runs = r.json()["runs"]
+        # populated_dir has metrics, so it should be discovered
+        assert len(runs) >= 1
+        # config.run_dir unchanged after discover
+        assert app.state.config.run_dir == populated_dir
+
+
+class TestTailerNoRewire:
+    """Phase 5: JsonlTailer no longer has a rewire method."""
+
+    def test_tailer_no_rewire_method(self):
+        """JsonlTailer should not have a rewire() method."""
+        from hotcb.server.tailer import JsonlTailer
+        tailer = JsonlTailer()
+        assert not hasattr(tailer, "rewire"), (
+            "JsonlTailer.rewire() should be removed in Phase 5"
+        )
+
+    def test_tailer_still_has_diagnostics(self):
+        """get_cursor_offsets should still be available for diagnostics."""
+        from hotcb.server.tailer import JsonlTailer
+        tailer = JsonlTailer()
+        path = "/tmp/nonexistent.jsonl"
+        tailer.watch("test", path)
+        offsets = tailer.get_cursor_offsets()
+        assert "test" in offsets
+        assert offsets["test"] == 0
+
+
+class TestLauncherImmutableRunDir:
+    """Phase 5: Launcher writes directly to run_dir, no subdirs."""
+
+    def test_launcher_writes_to_run_dir_directly(self):
+        """Launcher.start() should write JSONL files to run_dir, not subdirs."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from hotcb.server.launcher import TrainingLauncher, TrainingConfig
+
+            # Register a minimal training config
+            def _noop_train(run_dir, max_steps, step_delay, stop_event):
+                # Write one metric record and exit
+                with open(os.path.join(run_dir, "hotcb.metrics.jsonl"), "a") as f:
+                    f.write(json.dumps({"step": 0, "metrics": {"loss": 0.5}}) + "\n")
+
+            launcher = TrainingLauncher(tmpdir)
+            launcher.register_config(TrainingConfig(
+                config_id="test",
+                name="Test",
+                description="test",
+                train_fn=_noop_train,
+                defaults={"max_steps": 1, "step_delay": 0.0},
+            ))
+
+            result = launcher.start(config_id="test", max_steps=1, step_delay=0.0)
+            assert result.get("started") is True
+            assert result["run_dir"] == tmpdir  # writes to run_dir directly
+
+            # Wait for training to finish
+            import time
+            for _ in range(50):
+                if not launcher.running:
+                    break
+                time.sleep(0.1)
+
+            # JSONL files should be in tmpdir, not in subdirs
+            assert os.path.exists(os.path.join(tmpdir, "hotcb.metrics.jsonl"))
+            assert os.path.exists(os.path.join(tmpdir, "hotcb.run.json"))
+
+            # No subdirs should have been created
+            entries = os.listdir(tmpdir)
+            subdirs = [e for e in entries if os.path.isdir(os.path.join(tmpdir, e))]
+            assert subdirs == [], f"No subdirs expected, found: {subdirs}"
+
+    def test_launcher_truncates_on_restart(self):
+        """Starting training again should truncate JSONL files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from hotcb.server.launcher import TrainingLauncher, TrainingConfig
+
+            step_counter = [0]
+
+            def _counting_train(run_dir, max_steps, step_delay, stop_event):
+                step_counter[0] += 1
+                with open(os.path.join(run_dir, "hotcb.metrics.jsonl"), "a") as f:
+                    f.write(json.dumps({
+                        "step": 0, "metrics": {"loss": 0.5, "run": step_counter[0]}
+                    }) + "\n")
+
+            launcher = TrainingLauncher(tmpdir)
+            launcher.register_config(TrainingConfig(
+                config_id="test",
+                name="Test",
+                description="test",
+                train_fn=_counting_train,
+                defaults={"max_steps": 1, "step_delay": 0.0},
+            ))
+
+            # First run: write some data
+            metrics_path = os.path.join(tmpdir, "hotcb.metrics.jsonl")
+            with open(metrics_path, "w") as f:
+                f.write(json.dumps({"step": 99, "metrics": {"old": True}}) + "\n")
+
+            # Start should truncate existing data
+            result = launcher.start(config_id="test", max_steps=1, step_delay=0.0)
+            assert result.get("started") is True
+
+            import time
+            for _ in range(50):
+                if not launcher.running:
+                    break
+                time.sleep(0.1)
+
+            # Read the metrics file — old data (step 99) should be gone
+            records = []
+            with open(metrics_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        records.append(json.loads(line))
+
+            # Should only have the new record, not the old step=99
+            assert all(r["step"] != 99 for r in records), (
+                "Old data should be truncated on restart"
+            )
+
+    def test_launcher_no_active_run_dir(self):
+        """TrainingLauncher should not have _active_run_dir attribute."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from hotcb.server.launcher import TrainingLauncher
+            launcher = TrainingLauncher(tmpdir)
+            assert not hasattr(launcher, "_active_run_dir"), (
+                "_active_run_dir removed in Phase 5; launcher uses _run_dir only"
+            )

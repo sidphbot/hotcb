@@ -4,7 +4,12 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
+import logging
+
 from .util import safe_mtime
+
+_log = logging.getLogger("hotcb.freeze")
+_VALID_FREEZE_MODES = {"off", "prod", "replay", "replay_adjusted"}
 
 
 @dataclass
@@ -30,8 +35,13 @@ class FreezeState:
             # On parse error, default to off but keep mtime to avoid loops.
             return cls(mode="off", _mtime=safe_mtime(path))
 
+        mode = str(data.get("mode", "off"))
+        if mode not in _VALID_FREEZE_MODES:
+            _log.warning("Invalid freeze mode %r, defaulting to 'off'", mode)
+            mode = "off"
+
         return cls(
-            mode=str(data.get("mode", "off")),
+            mode=mode,
             recipe_path=data.get("recipe_path"),
             adjust_path=data.get("adjust_path"),
             policy=str(data.get("policy", "best_effort")),

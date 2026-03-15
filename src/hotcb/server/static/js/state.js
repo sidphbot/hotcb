@@ -5,6 +5,7 @@
 const COLORS = ['#00d4aa','#3d9eff','#ff9833','#ff4d5e','#9966ff','#33dd77','#ffd233','#33ccdd','#ff66aa','#aabb44'];
 
 const S = {
+  config: null,            // populated from /api/config at startup
   ws: null,
   metricsData: {},       // {metricName: [{step, value}]}
   appliedData: [],
@@ -54,11 +55,19 @@ function saveUIState() {
     state.pinnedMetrics = Array.from(S.pinnedMetrics || []);
   }
   // Don't persist focusMetric — it should reset with the session
-  // Knobs
-  var lr = document.getElementById('knobLr');
-  var wd = document.getElementById('knobWd');
-  if (lr) state.knobs.lr = lr.value;
-  if (wd) state.knobs.wd = wd.value;
+  // Knobs — save all dynamic control values
+  var panel = document.getElementById('knobPanel');
+  if (panel) {
+    panel.querySelectorAll('.knob-row[data-param]').forEach(function(row) {
+      var param = row.dataset.param;
+      var slider = row.querySelector('.knob-slider');
+      var toggle = row.querySelector('.knob-toggle');
+      var select = row.querySelector('.knob-select');
+      if (toggle) state.knobs[param] = toggle.checked;
+      else if (select) state.knobs[param] = select.value;
+      else if (slider) state.knobs[param] = slider.value;
+    });
+  }
   // Metric visibility
   if (S.metricNames) {
     S.metricNames.forEach(function(name) {

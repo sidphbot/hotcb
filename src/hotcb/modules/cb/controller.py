@@ -12,8 +12,6 @@ from .loader import instantiate_callback
 from .ops import Op
 from .protocol import CallbackTarget
 from .util import FileCursor, read_new_jsonl, safe_mtime
-from dataclasses import dataclass, field
-from .util import FileCursor, read_new_jsonl, safe_mtime
 
 
 @dataclass

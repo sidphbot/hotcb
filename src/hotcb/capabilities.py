@@ -25,8 +25,8 @@ class TrainingCapabilities:
     scheduler_types: Tuple[str, ...] = ()
     grad_accumulation_steps: int = 1  # 1 = no accumulation
     automatic_optimization: bool = True
-    loss_state_detected: bool = False
-    loss_state_keys: Tuple[str, ...] = ()
+    mutable_state_detected: bool = False
+    mutable_state_keys: Tuple[str, ...] = ()
     grad_clip_value: Optional[float] = None  # None = not configured
     grad_clip_wired: bool = False  # True only if hotcb can actually modify it
     metric_names: Tuple[str, ...] = ()
@@ -35,7 +35,7 @@ class TrainingCapabilities:
         d = asdict(self)
         # Convert tuples to lists for JSON
         for k in ("optimizer_names", "num_param_groups", "scheduler_types",
-                   "loss_state_keys", "metric_names"):
+                   "mutable_state_keys", "metric_names"):
             if isinstance(d[k], tuple):
                 d[k] = list(d[k])
         return d
@@ -57,7 +57,7 @@ class TrainingCapabilities:
                 d = json.load(f)
             # Convert lists back to tuples
             for k in ("optimizer_names", "num_param_groups", "scheduler_types",
-                       "loss_state_keys", "metric_names"):
+                       "mutable_state_keys", "metric_names"):
                 if k in d and isinstance(d[k], list):
                     d[k] = tuple(d[k])
             return cls(**d)
@@ -65,8 +65,8 @@ class TrainingCapabilities:
             return None
 
 
-def validate_loss_state(obj: Any) -> Tuple[bool, dict]:
-    """Check if obj looks like a valid loss_state dict.
+def validate_mutable_state(obj: Any) -> Tuple[bool, dict]:
+    """Check if obj looks like a valid mutable_state dict.
 
     Returns (valid, normalized_dict).  Accepts both the standard
     ``{"weights": {...}, "terms": {...}}`` layout and a flat

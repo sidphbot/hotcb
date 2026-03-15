@@ -9,6 +9,51 @@ var _forecastCache = {};  // metric -> {forecast, mutation}
 // Highlighted mutation step (set when user clicks a timeline item)
 var _highlightedMutationStep = null;
 
+// Step range control: 'all' | 'last200' | 'last500' | {min, max}
+var _chartStepRange = 'all';
+
+// Y-axis normalization: when enabled, each metric is normalized to [0,1]
+// Auto-detected on first data: true if metrics have divergent scales
+var _chartNormalize = false;
+var _chartNormalizeAuto = true;  // auto-detection active until user manually toggles
+
+// Max points to render per dataset (avoids sluggish charts on very long runs)
+var _maxRenderPoints = (S.config && S.config.chart) ? S.config.chart.max_render_points : 2000;
+
+/**
+ * LTTB (Largest-Triangle-Three-Buckets) downsampling.
+ * Takes [{x, y}] and returns a reduced array preserving visual shape.
+ */
+function _lttbDownsample(data, threshold) {
+  if (data.length <= threshold) return data;
+  var sampled = [data[0]];  // always keep first
+  var bucketSize = (data.length - 2) / (threshold - 2);
+  var a = 0;  // index of previously selected point
+  for (var i = 0; i < threshold - 2; i++) {
+    // Calculate bucket range
+    var bStart = Math.floor((i + 1) * bucketSize) + 1;
+    var bEnd   = Math.min(Math.floor((i + 2) * bucketSize) + 1, data.length - 1);
+    // Average of next bucket (for triangle area calc)
+    var avgX = 0, avgY = 0, cnt = 0;
+    var nbStart = Math.floor((i + 2) * bucketSize) + 1;
+    var nbEnd   = Math.min(Math.floor((i + 3) * bucketSize) + 1, data.length - 1);
+    if (nbStart > data.length - 1) { nbStart = data.length - 1; nbEnd = data.length - 1; }
+    for (var j = nbStart; j <= nbEnd; j++) { avgX += data[j].x; avgY += data[j].y; cnt++; }
+    avgX /= cnt; avgY /= cnt;
+    // Pick point in current bucket with largest triangle area
+    var maxArea = -1, maxIdx = bStart;
+    var ax = data[a].x, ay = data[a].y;
+    for (var k = bStart; k <= bEnd; k++) {
+      var area = Math.abs((ax - avgX) * (data[k].y - ay) - (ax - data[k].x) * (avgY - ay));
+      if (area > maxArea) { maxArea = area; maxIdx = k; }
+    }
+    sampled.push(data[maxIdx]);
+    a = maxIdx;
+  }
+  sampled.push(data[data.length - 1]);  // always keep last
+  return sampled;
+}
+
 // ---- Mutation annotation plugin for Chart.js ----
 var mutationAnnotationPlugin = {
   id: 'mutationAnnotations',
@@ -21,12 +66,19 @@ var mutationAnnotationPlugin = {
     var top = yScale.top;
     var bottom = yScale.bottom;
 
+    // Determine actual data range — skip annotations outside metric data
+    var dataMinStep = _getMinStep();
+    var dataMaxStep = _getMaxStep();
+    if (dataMaxStep === 0) return;  // no metric data yet
+
     // Collect visible annotations with pixel positions for staggering
     var annotations = [];
     S.appliedData.forEach(function(rec) {
       var step = rec.step;
       if (step === undefined || step === null) return;
+      // Filter to both visible x-axis range AND actual data range
       if (step < xScale.min || step > xScale.max) return;
+      if (step < dataMinStep || step > dataMaxStep) return;
       var x = xScale.getPixelForValue(step);
       annotations.push({rec: rec, x: x, step: step});
     });
@@ -73,12 +125,16 @@ var mutationAnnotationPlugin = {
 
       // Build compact label — split into multiple lines if needed
       var lines = [];
-      if (rec.params && typeof rec.params === 'object') {
-        var keys = Object.keys(rec.params);
+      var annotParams = (rec.params && typeof rec.params === 'object') ? rec.params :
+                        (rec.payload && typeof rec.payload === 'object') ? rec.payload : null;
+      if (annotParams) {
+        var keys = Object.keys(annotParams);
         keys.slice(0, 3).forEach(function(k) {
-          var v = rec.params[k];
+          var v = annotParams[k];
           if (typeof v === 'number') {
             v = v < 0.01 || v > 1e4 ? v.toExponential(1) : parseFloat(v.toPrecision(3));
+          } else if (typeof v === 'object' && v !== null) {
+            v = JSON.stringify(v);
           }
           lines.push(k + '\u2192' + v);
         });
@@ -127,6 +183,14 @@ var mutationAnnotationPlugin = {
 
 // Register the plugin globally
 Chart.register(mutationAnnotationPlugin);
+
+// Custom tooltip positioner — show to the right of the cursor
+Chart.Tooltip.positioners.rightOfCursor = function(elements, eventPosition) {
+  return {
+    x: eventPosition.x + 15,
+    y: eventPosition.y
+  };
+};
 
 // ---- Linear regression slope helper ----
 function _linregSlope(points) {
@@ -285,13 +349,14 @@ function scrollChartToStep(step) {
   var xScale = S.chartInstance.scales.x;
   if (!xScale) return;
   var range = xScale.max - xScale.min;
-  if (range <= 0) return;
+  if (range <= 0) range = 200;
   // Only adjust if the step is outside the visible range
   if (step >= xScale.min && step <= xScale.max) return;
   var half = range / 2;
-  S.chartInstance.options.scales.x.min = step - half;
-  S.chartInstance.options.scales.x.max = step + half;
+  _chartStepRange = { min: Math.max(0, step - half), max: step + half };
+  _applyChartStepRange();
   S.chartInstance.update('none');
+  _updateRangeButtons();
 }
 
 function createMetricsChart() {
@@ -309,16 +374,101 @@ function createMetricsChart() {
       },
       plugins: {
         legend: {display:false},
-        tooltip: { backgroundColor:'#121c2b', borderColor:'#2a4060', borderWidth:1,
-                   titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:11} }
+        tooltip: { backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--bg-card').trim() || '#121c2b',
+                   borderColor: getComputedStyle(document.documentElement).getPropertyValue('--border-bright').trim() || '#2a4060', borderWidth:1,
+                   titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:11},
+                   usePointStyle: false, boxWidth: 12, boxHeight: 2,
+                   intersect: false, mode: 'index', axis: 'x', position: 'rightOfCursor',
+                   filter: function(item) {
+                     // Hide internal datasets (confidence bands, etc.)
+                     var label = item.dataset.label || '';
+                     return !label.startsWith('_');
+                   },
+                   itemSort: function(a, b) {
+                     // Sort tooltip items by Y-pixel distance to cursor (TensorBoard-style)
+                     var chart = a.chart;
+                     var cursorY = 0;
+                     if (chart && chart._lastEvent) cursorY = chart._lastEvent.y;
+                     var ay = a.element ? a.element.y : 0;
+                     var by = b.element ? b.element.y : 0;
+                     return Math.abs(ay - cursorY) - Math.abs(by - cursorY);
+                   },
+                   callbacks: {
+                     label: function(ctx) {
+                       var ds = ctx.dataset;
+                       var label = ds.label || '';
+                       if (label.startsWith('_')) return null;
+                       var rawY = ctx.parsed.y;
+                       // Color swatch via dataset borderColor
+                       var color = ds.borderColor || '#fff';
+                       var prefix = '';
+                       // When normalized, show both normalized and raw values
+                       if (_chartNormalize) {
+                         var metricName = label.replace(/ forecast$/, '').replace(/ post-change$/, '');
+                         var rawPts = S.metricsData[metricName];
+                         if (rawPts && rawPts.length > 0) {
+                           var step = ctx.parsed.x;
+                           var rawVal = null;
+                           for (var i = 0; i < rawPts.length; i++) {
+                             if (rawPts[i].step >= step) { rawVal = rawPts[i].value; break; }
+                             rawVal = rawPts[i].value;
+                           }
+                           if (rawVal !== null) {
+                             return ' ' + label + ': ' + fmtNum(rawVal);
+                           }
+                         }
+                       }
+                       return ' ' + label + ': ' + fmtNum(rawY);
+                     }
+                   }
+        }
       },
-      elements: { point: {radius:0, hoverRadius:3}, line: {borderWidth:1.5, tension:0.3} }
+      interaction: { mode: 'index', axis: 'x', intersect: false },
+      elements: { point: {radius:0, hoverRadius:5, hitRadius:10}, line: {borderWidth:1.5, tension: (S.config && S.config.chart) ? S.config.chart.line_tension : 0.15} }
     }
   });
 }
 
 function updateChart() {
   if (!S.chartInstance) return;
+
+  // Auto-detect normalization need: if enabled metrics span > 100x range, auto-enable
+  if (_chartNormalizeAuto) {
+    var globalMin = Infinity, globalMax = -Infinity;
+    var metricRanges = [];
+    S.metricNames.forEach(function(name) {
+      if (!_metricToggleState[name]) return;
+      var pts = S.metricsData[name] || [];
+      if (pts.length < 2) return;
+      var mn = Infinity, mx = -Infinity;
+      for (var i = Math.max(0, pts.length - 100); i < pts.length; i++) {
+        if (pts[i].value < mn) mn = pts[i].value;
+        if (pts[i].value > mx) mx = pts[i].value;
+      }
+      metricRanges.push({min: mn, max: mx});
+      if (mn < globalMin) globalMin = mn;
+      if (mx > globalMax) globalMax = mx;
+    });
+    if (metricRanges.length >= 2) {
+      // Check if the max range across metrics is > 100x the min range
+      var spans = metricRanges.map(function(r) { return Math.abs(r.max - r.min) || 1e-10; });
+      var maxSpan = Math.max.apply(null, spans);
+      var minSpan = Math.min.apply(null, spans);
+      var needsNorm = (maxSpan / minSpan > 50) || (Math.abs(globalMax - globalMin) > 0 && (
+        metricRanges.some(function(r) {
+          var mid = (r.max + r.min) / 2;
+          var halfRange = (globalMax - globalMin) / 2;
+          return halfRange > 0 && Math.abs(r.max - r.min) / halfRange < 0.01;
+        })
+      ));
+      if (needsNorm !== _chartNormalize) {
+        _chartNormalize = needsNorm;
+        var normBtn = document.getElementById('btnNormalize');
+        if (normBtn) normBtn.classList.toggle('btn-accent', _chartNormalize);
+      }
+    }
+  }
+
   var datasets = [];
   var enabled = new Set();
   S.metricNames.forEach(function(name) {
@@ -335,81 +485,221 @@ function updateChart() {
     var pts = S.metricsData[name] || [];
     var color = getColor(name);
 
-    // Live data line
+    // Compute per-metric min/max for normalization
+    var metricMin = Infinity, metricMax = -Infinity;
+    if (_chartNormalize && pts.length > 0) {
+      pts.forEach(function(p) {
+        if (p.value < metricMin) metricMin = p.value;
+        if (p.value > metricMax) metricMax = p.value;
+      });
+      if (metricMax === metricMin) { metricMin -= 0.5; metricMax += 0.5; }
+    }
+    var _normFn = (_chartNormalize && metricMax !== metricMin)
+      ? function(v) { return (v - metricMin) / (metricMax - metricMin); }
+      : function(v) { return v; };
+
+    // Live data line — sort by step to prevent backward line connectors
+    // (validation records can appear between training steps with lower step numbers)
+    var chartPts = pts.map(function(p) { return {x: p.step, y: _normFn(p.value)}; });
+    chartPts.sort(function(a, b) { return a.x - b.x; });
+    chartPts = _lttbDownsample(chartPts, _maxRenderPoints);
+    var _cfgTension = (S.config && S.config.chart) ? S.config.chart.line_tension : 0.15;
+    var _cfgForecastDash = (S.config && S.config.chart) ? S.config.chart.forecast_dash : [6, 3];
+    var _cfgMutationDash = (S.config && S.config.chart) ? S.config.chart.mutation_dash : [3, 4];
+
     datasets.push({
       label: name,
-      data: pts.map(function(p) { return {x: p.step, y: p.value}; }),
+      data: chartPts,
       borderColor: color,
       backgroundColor: 'transparent',
-      tension: 0.3,
+      tension: _cfgTension,
     });
 
     var lastStep = pts.length ? pts[pts.length - 1].step : 0;
     var lastVal = pts.length ? pts[pts.length - 1].value : null;
+    var lastValNorm = lastVal !== null ? _normFn(lastVal) : null;
     var cache = _forecastCache[name];
+    var showOverlays = S.focusMetric === name || (S.pinnedMetrics && S.pinnedMetrics.has(name));
 
-    // Forecast overlay (dotted extension in same color but lighter)
-    if (cache && cache.forecast && cache.forecast.values && cache.forecast.values.length) {
+    // Forecast overlay — only shown for pinned or focused metrics to reduce clutter
+    // Guard: only render if forecast steps are contiguous with current data (avoids stale cross-run connectors)
+    if (showOverlays && cache && cache.forecast && cache.forecast.values && cache.forecast.values.length
+        && lastStep > 0 && lastVal !== null
+        && cache.forecast.steps && cache.forecast.steps[0] <= lastStep + 50) {
       var fc = cache.forecast;
-      var fcPts = [{x: lastStep, y: lastVal}];  // Connect to last actual point
-      fc.values.forEach(function(v, i) { fcPts.push({x: fc.steps[i], y: v}); });
+      var fcPts = [{x: lastStep, y: lastValNorm}];  // Connect to last actual point
+      fc.values.forEach(function(v, i) { fcPts.push({x: fc.steps[i], y: _normFn(v)}); });
       datasets.push({
         label: name + ' forecast',
         data: fcPts,
         borderColor: color,
-        borderDash: [6, 3],
+        borderDash: _cfgForecastDash,
         backgroundColor: 'transparent',
-        tension: 0.3,
+        tension: _cfgTension,
         borderWidth: 1.2,
         pointRadius: 0,
       });
       // Confidence band
       if (fc.lower && fc.upper) {
-        var loPts = [{x: lastStep, y: lastVal}];
-        var hiPts = [{x: lastStep, y: lastVal}];
-        fc.lower.forEach(function(v, i) { loPts.push({x: fc.steps[i], y: v}); });
-        fc.upper.forEach(function(v, i) { hiPts.push({x: fc.steps[i], y: v}); });
+        var loPts = [{x: lastStep, y: lastValNorm}];
+        var hiPts = [{x: lastStep, y: lastValNorm}];
+        fc.lower.forEach(function(v, i) { loPts.push({x: fc.steps[i], y: _normFn(v)}); });
+        fc.upper.forEach(function(v, i) { hiPts.push({x: fc.steps[i], y: _normFn(v)}); });
         datasets.push({
           label: '_' + name + '_lo',
           data: loPts,
           borderColor: 'transparent',
           backgroundColor: hexToRgba(color, 0.06),
           fill: '+1',
-          pointRadius: 0, tension: 0.3,
+          pointRadius: 0, tension: _cfgTension,
         });
         datasets.push({
           label: '_' + name + '_hi',
           data: hiPts,
           borderColor: 'transparent',
           backgroundColor: 'transparent',
-          pointRadius: 0, tension: 0.3,
+          pointRadius: 0, tension: _cfgTension,
         });
       }
     }
 
-    // Mutation impact overlay (cyan dotted)
-    if (cache && cache.mutation && cache.mutation.values && cache.mutation.values.length) {
+    // Mutation impact overlay — only shown for pinned or focused metrics
+    // Guard: only render if fromStep is within current data range (avoids stale cross-run connectors)
+    if (showOverlays && cache && cache.mutation && cache.mutation.values && cache.mutation.values.length) {
       var mu = cache.mutation;
-      var muPts = [{x: mu.fromStep, y: mu.fromVal}];
-      mu.values.forEach(function(v, i) { muPts.push({x: mu.steps[i], y: v}); });
-      datasets.push({
-        label: name + ' post-change',
-        data: muPts,
-        borderColor: 'rgba(51,204,221,0.7)',
-        borderDash: [3, 4],
-        backgroundColor: 'transparent',
-        tension: 0.3,
-        borderWidth: 1.2,
-        pointRadius: 0,
-      });
+      var inDataRange = pts.length > 0 && mu.fromStep >= pts[0].step && mu.fromStep <= pts[pts.length - 1].step;
+      if (inDataRange) {
+        var muPts = [{x: mu.fromStep, y: _normFn(mu.fromVal)}];
+        mu.values.forEach(function(v, i) { muPts.push({x: mu.steps[i], y: _normFn(v)}); });
+        datasets.push({
+          label: name + ' post-change',
+          data: muPts,
+          borderColor: 'rgba(51,204,221,0.7)',
+          borderDash: _cfgMutationDash,
+          backgroundColor: 'transparent',
+          tension: _cfgTension,
+          borderWidth: 1.2,
+          pointRadius: 0,
+        });
+      }
     }
   });
 
   S.chartInstance.data.datasets = datasets;
+
+  // Apply step range to x-axis
+  _applyChartStepRange();
+
+  // Update Y-axis title for normalization mode
+  var yOpts = S.chartInstance.options.scales.y;
+  if (_chartNormalize) {
+    yOpts.title = {display: true, text: 'Normalized [0,1]', color: '#7a8fa3', font: {size: 10}};
+  } else {
+    yOpts.title = {display: false};
+  }
+
   S.chartInstance.update('none');
 
   // Also update any pinned metric cards
   updateMetricCards();
+}
+
+function _getMaxStep() {
+  var maxStep = 0;
+  S.metricNames.forEach(function(name) {
+    var pts = S.metricsData[name] || [];
+    if (pts.length) maxStep = Math.max(maxStep, pts[pts.length - 1].step);
+  });
+  return maxStep;
+}
+
+function _getMinStep() {
+  var minStep = Infinity;
+  S.metricNames.forEach(function(name) {
+    var pts = S.metricsData[name] || [];
+    if (pts.length) minStep = Math.min(minStep, pts[0].step);
+  });
+  return minStep === Infinity ? 0 : minStep;
+}
+
+function _applyChartStepRange() {
+  if (!S.chartInstance) return;
+  var xOpts = S.chartInstance.options.scales.x;
+  if (_chartStepRange === 'all') {
+    delete xOpts.min;
+    delete xOpts.max;
+  } else if (_chartStepRange === 'last200') {
+    var mx = _getMaxStep();
+    xOpts.min = Math.max(0, mx - 200);
+    delete xOpts.max;
+  } else if (_chartStepRange === 'last500') {
+    var mx2 = _getMaxStep();
+    xOpts.min = Math.max(0, mx2 - 500);
+    delete xOpts.max;
+  } else if (typeof _chartStepRange === 'object' && _chartStepRange !== null) {
+    xOpts.min = _chartStepRange.min;
+    xOpts.max = _chartStepRange.max;
+  }
+}
+
+function setChartStepRange(mode) {
+  _chartStepRange = mode;
+  updateChart();
+  _updateRangeButtons();
+}
+
+function _updateRangeButtons() {
+  var btns = document.querySelectorAll('#stepRangeControls .range-btn[data-range]');
+  btns.forEach(function(btn) {
+    var isActive = (typeof _chartStepRange === 'string' && btn.dataset.range === _chartStepRange);
+    btn.classList.toggle('active', isActive);
+  });
+  // Update custom inputs if range is a custom object
+  var minEl = document.getElementById('rangeMin');
+  var maxEl = document.getElementById('rangeMax');
+  if (minEl && maxEl) {
+    if (typeof _chartStepRange === 'object' && _chartStepRange !== null) {
+      minEl.value = _chartStepRange.min != null ? _chartStepRange.min : '';
+      maxEl.value = _chartStepRange.max != null ? _chartStepRange.max : '';
+    }
+  }
+}
+
+function initStepRangeControls() {
+  var container = document.getElementById('stepRangeControls');
+  if (!container) return;
+
+  // Preset buttons
+  container.querySelectorAll('.range-btn[data-range]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      setChartStepRange(btn.dataset.range);
+    });
+  });
+
+  // Custom range apply
+  var applyBtn = document.getElementById('rangeApply');
+  var minEl = document.getElementById('rangeMin');
+  var maxEl = document.getElementById('rangeMax');
+  if (applyBtn && minEl && maxEl) {
+    applyBtn.addEventListener('click', function() {
+      var mn = minEl.value !== '' ? parseInt(minEl.value, 10) : undefined;
+      var mx = maxEl.value !== '' ? parseInt(maxEl.value, 10) : undefined;
+      if (mn === undefined && mx === undefined) {
+        setChartStepRange('all');
+      } else {
+        setChartStepRange({
+          min: mn !== undefined ? mn : 0,
+          max: mx !== undefined ? mx : undefined
+        });
+      }
+    });
+    // Enter key in inputs triggers apply
+    [minEl, maxEl].forEach(function(el) {
+      el.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') applyBtn.click();
+      });
+    });
+  }
 }
 
 function hexToRgba(hex, alpha) {
@@ -421,12 +711,16 @@ function hexToRgba(hex, alpha) {
 
 var _metricToggleState = {};  // metric name -> boolean (checked)
 var _metricDropdownShowAll = false;
+var _dropdownCloseHandler = null;
 var _commonMetricPatterns = [
   'train_loss', 'val_loss', 'loss', 'accuracy', 'val_accuracy',
   'train_accuracy', 'lr', 'learning_rate', 'grad_norm', 'grad_norm_total',
   'epoch', 'perplexity', 'val_perplexity', 'f1', 'val_f1',
   'precision', 'recall', 'auc', 'val_auc', 'bleu'
 ];
+
+// Metrics shown by default on chart — losses and key metric only
+var _defaultOnPatterns = ['loss', 'val_loss', 'train_loss'];
 
 function _isCommonMetric(name) {
   var lower = name.toLowerCase();
@@ -468,7 +762,16 @@ function updateMetricToggles() {
   S.metricNames.forEach(function(name) {
     currentCount++;
     if (!(name in _metricToggleState)) {
-      _metricToggleState[name] = true;  // default checked
+      // Default: only show losses and key metric; others off
+      var lower = name.toLowerCase();
+      var isDefault = false;
+      for (var di = 0; di < _defaultOnPatterns.length; di++) {
+        if (lower === _defaultOnPatterns[di] || lower.indexOf(_defaultOnPatterns[di]) !== -1) { isDefault = true; break; }
+      }
+      // Also check AI key metric
+      var aiKeyMetricEl = document.getElementById('aiKeyMetric');
+      if (aiKeyMetricEl && aiKeyMetricEl.value === name) isDefault = true;
+      _metricToggleState[name] = isDefault;
     }
   });
 
@@ -583,49 +886,70 @@ function _renderMetricDropdown(container) {
   var visible = _getVisibleMetrics();
   visible.forEach(function(name) {
     var color = getColor(name);
-    var row = document.createElement('label');
+    var row = document.createElement('div');
     row.className = 'metric-dropdown-item';
 
-    var cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = !!_metricToggleState[name];
-    cb.dataset.metric = name;
-    cb.addEventListener('change', function(e) {
+    var isActive = !!_metricToggleState[name];
+    var isPinned = S.pinnedMetrics && S.pinnedMetrics.has(name);
+
+    // Filled/hollow dot toggle (replaces checkbox + swatch)
+    var dot = document.createElement('span');
+    dot.className = 'metric-dot' + (isActive ? ' active' : '') + (isPinned ? ' pinned' : '');
+    dot.style.color = color;
+    dot.style.borderColor = color;
+    if (isActive) dot.style.background = color;
+    dot.title = isActive ? 'Hide metric' : 'Show metric';
+    dot.addEventListener('click', function(e) {
       e.stopPropagation();
-      _metricToggleState[name] = cb.checked;
-      // Update the badge count
+      _metricToggleState[name] = !_metricToggleState[name];
       var cnt = 0;
       S.metricNames.forEach(function(n) { if (_metricToggleState[n]) cnt++; });
       var badge = wrapper.querySelector('.metric-count-badge');
       if (badge) badge.textContent = cnt + '/' + totalCount;
+      _renderMetricDropdown(container);
       updateChart();
     });
-
-    var swatch = document.createElement('span');
-    swatch.className = 'swatch';
-    swatch.style.background = color;
-
-    var label = document.createElement('span');
-    label.className = 'metric-dropdown-name';
-    label.textContent = name;
-
-    var pinBtn = document.createElement('button');
-    var isPinned = S.pinnedMetrics && S.pinnedMetrics.has(name);
-    pinBtn.className = 'pin-btn' + (isPinned ? ' pin-btn-active' : '');
-    pinBtn.dataset.metric = name;
-    pinBtn.title = isPinned ? 'Unpin metric card' : 'Pin metric card';
-    pinBtn.innerHTML = '&#128204;';
-    pinBtn.addEventListener('click', function(e) {
-      e.preventDefault();
-      e.stopPropagation();
+    // Double-click or right-click to toggle pin
+    dot.addEventListener('dblclick', function(e) {
+      e.stopPropagation(); e.preventDefault();
+      toggleMetricCard(name);
+      _renderMetricDropdown(container);
+    });
+    dot.addEventListener('contextmenu', function(e) {
+      e.preventDefault(); e.stopPropagation();
       toggleMetricCard(name);
       _renderMetricDropdown(container);
     });
 
-    row.appendChild(cb);
-    row.appendChild(swatch);
+    var label = document.createElement('span');
+    label.className = 'metric-dropdown-name';
+    label.textContent = name;
+    label.addEventListener('click', function(e) {
+      e.stopPropagation();
+      _metricToggleState[name] = !_metricToggleState[name];
+      var cnt = 0;
+      S.metricNames.forEach(function(n) { if (_metricToggleState[n]) cnt++; });
+      var badge = wrapper.querySelector('.metric-count-badge');
+      if (badge) badge.textContent = cnt + '/' + totalCount;
+      _renderMetricDropdown(container);
+      updateChart();
+    });
+
+    row.appendChild(dot);
     row.appendChild(label);
-    row.appendChild(pinBtn);
+
+    // Pin button — always visible, toggles pinned state
+    var pinIcon = document.createElement('span');
+    pinIcon.className = 'metric-pin-icon' + (isPinned ? ' pinned' : '');
+    pinIcon.textContent = '\u{1F4CC}';
+    pinIcon.title = isPinned ? 'Unpin metric' : 'Pin metric (opens mini card)';
+    pinIcon.addEventListener('click', function(e) {
+      e.stopPropagation();
+      toggleMetricCard(name);
+      _renderMetricDropdown(container);
+    });
+    row.appendChild(pinIcon);
+
     list.appendChild(row);
   });
 
@@ -642,13 +966,19 @@ function _renderMetricDropdown(container) {
   panel.appendChild(list);
   wrapper.appendChild(panel);
 
-  // Close dropdown when clicking outside
-  document.addEventListener('click', function closeDropdown(e) {
-    if (!wrapper.contains(e.target)) {
-      var p = wrapper.querySelector('.metric-dropdown-panel');
-      if (p) p.classList.remove('open');
-    }
-  });
+  // Close dropdown when clicking outside (single delegated listener)
+  if (!_dropdownCloseHandler) {
+    _dropdownCloseHandler = function(e) {
+      var wraps = document.querySelectorAll('.metric-dropdown-wrap');
+      wraps.forEach(function(w) {
+        if (!w.contains(e.target)) {
+          var p = w.querySelector('.metric-dropdown-panel');
+          if (p) p.classList.remove('open');
+        }
+      });
+    };
+    document.addEventListener('click', _dropdownCloseHandler);
+  }
 }
 
 // ---- Per-metric pinnable cards ----
@@ -746,12 +1076,18 @@ function updateSingleMetricCard(name) {
   var color = getColor(name);
   var pts = S.metricsData[name] || [];
 
+  var _cfgTension = (S.config && S.config.chart) ? S.config.chart.line_tension : 0.15;
+  var _cfgForecastDash = (S.config && S.config.chart) ? S.config.chart.forecast_dash : [6, 3];
+  var _cfgMutationDash = (S.config && S.config.chart) ? S.config.chart.mutation_dash : [3, 4];
+
+  var chartPts = pts.map(function(p) { return {x: p.step, y: p.value}; });
+  chartPts = _lttbDownsample(chartPts, 500);  // mini cards need fewer points
   datasets.push({
     label: name,
-    data: pts.map(function(p) { return {x: p.step, y: p.value}; }),
+    data: chartPts,
     borderColor: color,
     backgroundColor: 'transparent',
-    tension: 0.3,
+    tension: _cfgTension,
   });
 
   var lastStep = pts.length ? pts[pts.length - 1].step : 0;
@@ -766,8 +1102,8 @@ function updateSingleMetricCard(name) {
     datasets.push({
       label: 'forecast',
       data: fcPts,
-      borderColor: color, borderDash: [6, 3],
-      backgroundColor: 'transparent', tension: 0.3, borderWidth: 1.2, pointRadius: 0,
+      borderColor: color, borderDash: _cfgForecastDash,
+      backgroundColor: 'transparent', tension: _cfgTension, borderWidth: 1.2, pointRadius: 0,
     });
   }
 
@@ -779,8 +1115,8 @@ function updateSingleMetricCard(name) {
     datasets.push({
       label: 'post-change',
       data: muPts,
-      borderColor: 'rgba(51,204,221,0.7)', borderDash: [3, 4],
-      backgroundColor: 'transparent', tension: 0.3, borderWidth: 1.2, pointRadius: 0,
+      borderColor: 'rgba(51,204,221,0.7)', borderDash: _cfgMutationDash,
+      backgroundColor: 'transparent', tension: _cfgTension, borderWidth: 1.2, pointRadius: 0,
     });
   }
 
@@ -819,17 +1155,31 @@ async function fetchAllForecasts() {
     return;
   }
   _forecastInFlight = true;
-  var promises = [];
-  S.metricNames.forEach(function(name) {
-    promises.push(fetchForecastForMetric(name));
-  });
-  await Promise.all(promises);
+  // Only fetch forecasts for pinned or focused metrics — not all metrics
+  var names = [];
+  if (S.focusMetric) {
+    names.push(S.focusMetric);
+  }
+  if (S.pinnedMetrics) {
+    S.pinnedMetrics.forEach(function(name) {
+      if (names.indexOf(name) === -1) names.push(name);
+    });
+  }
+  if (names.length === 0) {
+    _forecastInFlight = false;
+    return;
+  }
+  var batchSize = (S.config && S.config.ui) ? S.config.ui.forecast_batch_size : 8;
+  for (var i = 0; i < names.length; i += batchSize) {
+    var batch = names.slice(i, i + batchSize);
+    await Promise.all(batch.map(fetchForecastForMetric));
+  }
   _forecastInFlight = false;
   updateChart();
   // If new data arrived while we were fetching, refresh again
   if (_forecastPendingRefresh) {
     _forecastPendingRefresh = false;
-    setTimeout(fetchAllForecasts, 500);
+    setTimeout(fetchAllForecasts, 1000);
   }
 }
 
@@ -842,17 +1192,31 @@ async function fetchForecastForMetric(name) {
 
 function startForecastPolling() {
   if (_forecastTimer) clearInterval(_forecastTimer);
-  // Poll every 5s as a baseline, but also triggered on new metrics
-  _forecastTimer = setInterval(fetchAllForecasts, 5000);
-  fetchAllForecasts();
+  var _forecastPollMs = (S.config && S.config.ui) ? S.config.ui.forecast_poll_interval : 5000;
+  // Poll at configured interval — new metrics also trigger refresh via onNewMetricsForForecast
+  _forecastTimer = setInterval(function() {
+    // Only fetch if we have pinned/focused metrics to avoid wasted work
+    if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
+      fetchAllForecasts();
+    }
+  }, _forecastPollMs);
+  // Delay initial fetch to let the dashboard settle
+  setTimeout(function() {
+    if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
+      fetchAllForecasts();
+    }
+  }, 3000);
 }
 
 // Called from websocket when new metrics arrive — trigger forecast refresh
 function onNewMetricsForForecast(maxStep) {
-  // Only trigger every 10 steps to avoid flooding
-  if (maxStep - _lastForecastStep >= 10) {
+  // Only trigger every N steps (from config), and only if there are pinned/focused metrics
+  var _forecastCadence = (S.config && S.config.ui) ? S.config.ui.forecast_step_cadence : 10;
+  if (maxStep - _lastForecastStep >= _forecastCadence) {
     _lastForecastStep = maxStep;
-    fetchAllForecasts();
+    if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
+      fetchAllForecasts();
+    }
   }
 }
 

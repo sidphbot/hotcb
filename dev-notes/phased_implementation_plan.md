@@ -83,15 +83,15 @@ The `src/hotops/` directory already contains working implementations of:
 - Auto-disable on error
 
 ### 2B. Unit tests — hotloss controller (spec §19.7)
-- Mutate weights/toggles in loss_state
+- Mutate weights/toggles in mutable_state
 - Mapping rules (distill_w → weights.distill, etc.)
-- Missing loss_state handling
+- Missing mutable_state handling
 - Error/auto-disable behavior
 
 ### 2C. HotOps Lightning adapter
 - **New file:** `src/hotops/adapters/lightning.py`
 - Build env with optimizer/scheduler references
-- Build env with loss_state hook (user-provided)
+- Build env with mutable_state hook (user-provided)
 - Call `kernel.apply(env, events)` at safe points
 - Pattern from existing `src/hotcb/adapters/lightning.py`
 

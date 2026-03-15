@@ -51,9 +51,8 @@ Your `train_fn` must:
 
 1. **Accept 4 positional args**: `(run_dir, max_steps, step_delay, stop_event)`
 2. **Check `stop_event`** periodically — call `stop_event.is_set()` each step
-3. **Write metrics** to `{run_dir}/hotcb.metrics.jsonl` as JSON lines
-4. **Read commands** from `{run_dir}/hotcb.commands.jsonl` to respond to UI knobs
-5. **Write applied mutations** to `{run_dir}/hotcb.applied.jsonl`
+3. **Provide metrics** — either manually write to `hotcb.metrics.jsonl`, or use `HotKernel` with `MetricsCollector` (recommended)
+4. **Handle commands** — either manually poll `hotcb.commands.jsonl`, or let `HotKernel` route them automatically (recommended)
 
 ### Metric Record Format
 
@@ -80,37 +79,26 @@ names and creates chart lines for each.
 
 ## Framework Examples
 
-### Bare PyTorch
+### Bare PyTorch (recommended: using HotKernel)
 
 ```python
-import json, os, time, torch, torch.nn as nn
+import os, time, torch, torch.nn as nn
+from hotcb.kernel import HotKernel
+from hotcb.metrics import MetricsCollector
+from hotcb.actuators import optimizer_actuators, mutable_state
 
 def pytorch_training(run_dir, max_steps, step_delay, stop_event):
-    metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")
-    commands_path = os.path.join(run_dir, "hotcb.commands.jsonl")
-    applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
+    mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
 
     model = nn.Linear(10, 2)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    ms = mutable_state(optimizer_actuators(optimizer))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc, mutable_state=ms)
     loss_fn = nn.CrossEntropyLoss()
-    cmd_offset = 0
 
     for step in range(1, max_steps + 1):
         if stop_event.is_set():
             break
-
-        # --- Read commands from dashboard ---
-        cmds, cmd_offset = _read_commands(commands_path, cmd_offset)
-        for cmd in cmds:
-            if cmd.get("module") == "opt" and cmd.get("op") == "set_params":
-                params = cmd.get("params", {})
-                if "lr" in params:
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = float(params["lr"])
-                _write_jsonl(applied_path, {
-                    "step": step, "module": "opt", "op": "set_params",
-                    "params": params, "status": "applied",
-                })
 
         # --- Training step ---
         x = torch.randn(32, 10)
@@ -121,76 +109,67 @@ def pytorch_training(run_dir, max_steps, step_delay, stop_event):
         loss.backward()
         optimizer.step()
 
-        # --- Write metrics ---
-        _write_jsonl(metrics_path, {
+        # --- kernel handles everything: command polling, metric writing, ledger ---
+        env = {
+            "framework": "torch",
+            "phase": "train",
             "step": step,
+            "optimizer": optimizer,
             "metrics": {
                 "train_loss": round(loss.item(), 6),
                 "lr": optimizer.param_groups[0]["lr"],
             },
-        })
+            "log": print,
+        }
+        kernel.apply(env, events=["train_step_end"])
 
         if step_delay > 0:
             time.sleep(step_delay)
 
-
-def _write_jsonl(path, record):
-    with open(path, "a") as f:
-        f.write(json.dumps(record) + "\n")
-
-def _read_commands(path, offset):
-    if not os.path.exists(path):
-        return [], offset
-    cmds = []
-    with open(path) as f:
-        for i, line in enumerate(f):
-            if i < offset:
-                continue
-            line = line.strip()
-            if line:
-                try: cmds.append(json.loads(line))
-                except: pass
-    return cmds, offset + len(cmds)
+    kernel.close(env)
 ```
 
 ### PyTorch Lightning
 
 ```python
-import json, os
+import os
 import pytorch_lightning as pl
-from hotcb.modules.cb import HotCallbackController
+from hotcb.kernel import HotKernel
+from hotcb.metrics import MetricsCollector
+from hotcb.adapters.lightning import HotCBLightning
 
 def lightning_training(run_dir, max_steps, step_delay, stop_event):
-    # hotcb provides a Lightning callback adapter
-    from hotcb.modules.cb.adapters import LightningAdapter
+    mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
+    # Optimizer actuators auto-discovered by HotCBLightning adapter
 
     model = MyLightningModule()
-    adapter = LightningAdapter(run_dir=run_dir)
 
-    # The adapter handles JSONL I/O automatically:
-    # - Writes metrics on_train_batch_end / on_validation_end
-    # - Reads commands and applies them to optimizer/loss
+    # The adapter maps Lightning hooks to kernel.apply() automatically:
+    # - Builds env with optimizer, metrics, mutable_state from trainer/module
+    # - Fires train_batch_end, val_batch_end, val_epoch_end events
     trainer = pl.Trainer(
         max_steps=max_steps,
-        callbacks=[adapter],
+        callbacks=[HotCBLightning(kernel)],
     )
     trainer.fit(model)
-    # Note: stop_event is checked internally by the adapter each step
 ```
 
 ### HuggingFace Transformers
 
 ```python
-import json, os
+import os
 from transformers import Trainer, TrainingArguments
+from hotcb.kernel import HotKernel
+from hotcb.metrics import MetricsCollector
+from hotcb.adapters.hf import HotCBHFCallback
 
 def hf_training(run_dir, max_steps, step_delay, stop_event):
-    from hotcb.modules.cb.adapters import HuggingFaceAdapter
+    mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
+    # Optimizer actuators auto-discovered by HotCBHFCallback adapter
 
     model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-
-    adapter = HuggingFaceAdapter(run_dir=run_dir, stop_event=stop_event)
 
     training_args = TrainingArguments(
         output_dir=os.path.join(run_dir, "checkpoints"),
@@ -202,7 +181,7 @@ def hf_training(run_dir, max_steps, step_delay, stop_event):
         model=model,
         args=training_args,
         train_dataset=my_dataset,
-        callbacks=[adapter],  # The adapter is a TrainerCallback
+        callbacks=[HotCBHFCallback(kernel)],
     )
     trainer.train()
 ```
@@ -238,4 +217,4 @@ uvicorn.run(app, host="0.0.0.0", port=8421)
 |-------------|-------------------------------|-------|-------------|
 | `simple`    | Simple (Quadratic)            | 500   | Single-task synthetic. Test basic controls. |
 | `multitask` | Multi-Objective (Golden Demo) | 800   | Two-task with recipe-driven lambda shifts. |
-| `finetune`  | Finetune (Pretrained Backbone)| 600   | Transfer learning with freeze/unfreeze control. |
+| `finetune`  | Finetune (Pretrained Backbone)| 600   | Transfer learning with recipe-driven LR scheduling. |

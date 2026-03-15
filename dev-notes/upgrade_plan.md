@@ -662,19 +662,19 @@ Hotloss should not require hooking into autograd internals. It should mutate a *
 
 #### **13.3.3 Env requirements**
 
-* `env["loss_state"]`: mutable mapping used by loss computation  
+* `env["mutable_state"]`: mutable mapping used by loss computation  
   OR  
-* `env["resolve_loss_state"]`: callable
+* `env["resolve_mutable_state"]`: callable
 
 If missing:
 
 * record `failed` or `skipped_noop`
 
-#### **13.3.4 Suggested loss\_state shape**
+#### **13.3.4 Suggested mutable\_state shape**
 
 A conventional structure:
 
-loss\_state \= {  
+mutable\_state \= {  
  "weights": {"distill": 0.2, "depth": 1.5},  
  "terms": {"aux\_depth": True, "aux\_heatmap": False},  
  "ramps": {"depth": {"type":"linear","warmup\_frac":0.2,"end":2.0}},  
@@ -860,7 +860,7 @@ When using HotOps:
    hf  
    but also expose:  
   * optimizer/scheduler references if available  
-  * loss\_state hook if user provides it  
+  * mutable\_state hook if user provides it  
 * Keep hotcb adapters for users who only install hotcb
 
 ---
@@ -975,7 +975,7 @@ This spec requires Approach A as the end state.
 
 ### **18.5 Implement hotloss controller**
 
-* Similar to hotopt but mutates `loss_state`
+* Similar to hotopt but mutates `mutable_state`
 
 ### **18.6 Ledger writer**
 
@@ -1166,9 +1166,9 @@ This is a full test plan. Assignable to agents as separate workstreams.
 
 ### **19.7 Unit tests — hotloss controller**
 
-* Mutate weights/toggles in loss\_state dict  
+* Mutate weights/toggles in mutable\_state dict  
 * Verify mapping rules (distill\_w → weights.distill, etc.)  
-* Missing loss\_state handling  
+* Missing mutable\_state handling  
 * Error/auto-disable behavior
 
 ---
@@ -1182,7 +1182,7 @@ Use a tiny Lightning model and trainer (CPU is fine).
 
   HotOps adapter must:  
 * expose optimizer or resolver  
-* expose loss\_state if user supplies
+* expose mutable\_state if user supplies
 
 Test:
 
@@ -1313,7 +1313,7 @@ You said you’ll delegate agents. Here’s a clean breakdown:
 
 **Agent E — hotloss module**
 
-* loss\_state contract \+ mapping
+* mutable\_state contract \+ mapping
 
 * weights/toggles/ramps
 

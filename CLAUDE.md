@@ -47,21 +47,31 @@ The kernel and training process communicate through the filesystem (JSONL files)
 | Module | Path | Controls |
 |--------|------|----------|
 | **cb** | `modules/cb/` | Callback load/unload/enable/disable/reconfigure. Has its own controller, loader, protocol, adapters |
-| **opt** | `modules/opt.py` | Live optimizer param changes (lr, weight_decay, clip) |
-| **loss** | `modules/loss.py` | Loss weights, term toggles, ramp configs |
 | **tune** | `modules/tune/` | Online constrained HPO via Optuna (optional `hotcb[tune]`) |
+| **opt/loss/custom** | Default stream → `MutableState` | All scalar parameter control (lr, weights, custom knobs) via unified actuator system |
 
 ### Key types
 
 - **`HotOp`** (`ops.py`): Normalized operation dataclass — every command becomes one. Fields: `module`, `op`, `id`, `params`, `target`, etc.
 - **`CallbackTarget`** (`ops.py`): Specifies a callback to load (kind, path, symbol).
-- **`HotKernel`** (`kernel.py`): Central coordinator. Holds module instances, actuator registry, optional `metrics_collector`. Called via `kernel.apply(env=..., events=...)` each training step.
+- **`HotKernel`** (`kernel.py`): Central coordinator. Holds module instances, `MutableState`, optional `metrics_collector`. Called via `kernel.apply(env=..., events=...)` each training step. Ops for `cb`/`tune` route to their modules; all others (opt/loss/custom) go through the default stream to `MutableState`.
+- **`HotcbActuator`** (`actuators/actuator.py`): Single controllable parameter — 1:1 mapping (param_key ↔ actuator). Has type (BOOL/FLOAT/INT/CHOICE/LOG_FLOAT/TUPLE), `apply_fn`, bounds, state machine (INIT→UNTOUCHED→UNVERIFIED→VERIFIED→DISABLED).
+- **`MutableState`** (`actuators/state.py`): Container of `HotcbActuator` instances. Provides `apply()`, `initialize()`, `verify()`, `describe_all()`.
 - **`FreezeState`** (`freeze.py`): Freeze mode manager (off/prod/replay/replay_adjusted).
 - **`RecipePlayer`** (`recipe.py`): Deterministic replay of exported recipes.
 
 ### Actuator system (`src/hotcb/actuators/`)
 
-Protocol-based (`BaseActuator`) — optimizer and loss_state actuators register with the kernel and are auto-propagated to the tune controller.
+Unified per-parameter actuator model. Convenience constructors:
+- `optimizer_actuators(optimizer)` — creates lr, wd, betas actuators from a torch optimizer
+- `loss_actuators(weights_dict)` — creates FLOAT actuators that mutate the original dict
+- `mutable_state(actuators)` — wraps a list of `HotcbActuator` instances into a `MutableState`
+
+Adapters auto-discover optimizer actuators from the framework (Lightning/HF). Users register custom actuators via `mutable_state()`.
+
+### Dashboard config (`src/hotcb/server/config.py`)
+
+`DashboardConfig` centralizes all tunables (poll intervals, history limits, chart settings, UI timers). Loaded from defaults → YAML → env vars → CLI. Served at `/api/config`, fetched once by frontend into `S.config`. Controls are generated dynamically from `MutableState.describe_all()` — no hardcoded slider HTML.
 
 ### Server / Dashboard (`src/hotcb/server/`)
 
@@ -73,6 +83,10 @@ FastAPI app (`app.py`) served via `hotcb serve`. Architecture:
 - **`ai_prompts.py`**: `TrendCompressor`, `build_context()`, `parse_ai_response()`, `ACTION_SCHEMA` — prompt assembly and response parsing for AI autopilot
 - **`launcher.py`**: Training launch/stop/reset from the dashboard
 - Static frontend: `server/static/` — vanilla JS (charts.js, controls.js, panels.js, websocket.js, state.js, init.js)
+
+### Demos (`src/hotcb/demo.py`, `golden_demo.py`, `finetune_demo.py`)
+
+Synthetic training loops that use HotKernel + MetricsCollector + actuators — the same integration path as real projects. Demos use a lightweight `_OptProxy` (dict with `param_groups`) instead of a real torch optimizer. Recipe-driven changes are injected as commands to `hotcb.commands.jsonl` at scheduled steps (not freeze/replay mode), so interactive dashboard control works simultaneously.
 
 ### Launch API (`src/hotcb/launch.py`)
 
@@ -91,6 +105,12 @@ Top-level adapters (`lightning.py`, `hf.py`) wrap HotKernel for PyTorch Lightnin
 
 Synthetic benchmarks and CIFAR-10 autopilot evaluation. `tasks.py` defines tasks, `runner.py` runs them, `report.py` generates outputs, `eval_autopilot.py` compares baseline vs autopilot.
 
+## Multi-Agent Coordination
+
+`.claude/plans/STREAMS.md` is the shared roadmap for parallel Claude Code sessions.
+One file, all streams. Use `/stream` to browse, attach, create, or release streams.
+Claim a stream (`status → active`), update checkboxes + log as you work, release when done.
+
 ## Conventions
 
 - **Filesystem as IPC**: Training ↔ dashboard communication is via JSONL files, not sockets or shared memory.
@@ -100,3 +120,6 @@ Synthetic benchmarks and CIFAR-10 autopilot evaluation. `tasks.py` defines tasks
 - **Source layout**: `src/hotcb/` is the single package. All imports use `hotcb.*`.
 - **Autopilot modes**: `off`, `suggest`, `auto` (rule-based); `ai_suggest`, `ai_auto` (LLM-driven). Rules act as sensor layer for AI modes.
 - **AI autopilot uses OpenAI-compatible API**: configured via `HOTCB_AI_KEY` env var and `AIConfig`. Works with OpenAI, ollama, vLLM.
+
+
+Always use skills /python-runtime-patterns /python-project-setup /python-dev-practices when working with this project.

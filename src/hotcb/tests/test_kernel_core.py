@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from hotcb.kernel import HotKernel
+from hotcb.actuators import optimizer_actuators, loss_actuators, mutable_state
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +160,11 @@ class TestPollInterval:
 
 class TestRouting:
     def test_route_to_opt(self, run_dir, make_env, write_commands, read_ledger):
-        """Ops with module='opt' reach the opt controller."""
+        """Ops with module='opt' route through default stream (MutableState)."""
         optimizer = _mock_optimizer(lr=0.01)
         write_commands({"module": "opt", "op": "set_params", "params": {"lr": 0.002}})
-        kernel = HotKernel(run_dir, debounce_steps=1)
+        ms = mutable_state(optimizer_actuators(optimizer))
+        kernel = HotKernel(run_dir, debounce_steps=1, mutable_state=ms)
         env = make_env(step=1, optimizer=optimizer)
         kernel.apply(env, ["step"])
 
@@ -174,18 +176,19 @@ class TestRouting:
         assert optimizer.param_groups[0]["lr"] == pytest.approx(0.002)
 
     def test_route_to_loss(self, run_dir, make_env, write_commands, read_ledger):
-        """Ops with module='loss' reach the loss controller."""
-        loss_state = {"weights": {}, "terms": {}, "ramps": {}}
-        write_commands({"module": "loss", "op": "set_params", "params": {"kl_w": 0.5}})
-        kernel = HotKernel(run_dir, debounce_steps=1)
-        env = make_env(step=1, loss_state=loss_state)
+        """Ops with module='loss' route through default stream (MutableState)."""
+        loss_weights = {"kl": 1.0}
+        write_commands({"module": "loss", "op": "set_params", "params": {"key": "kl", "value": 0.5}})
+        ms = mutable_state(loss_actuators(loss_weights))
+        kernel = HotKernel(run_dir, debounce_steps=1, mutable_state=ms)
+        env = make_env(step=1)
         kernel.apply(env, ["step"])
 
         ledger = read_ledger()
         assert len(ledger) == 1
         assert ledger[0]["decision"] == "applied"
         assert ledger[0]["module"] == "loss"
-        assert loss_state["weights"]["kl"] == 0.5
+        assert loss_weights["kl"] == pytest.approx(0.5)
 
     def test_route_to_core(self, run_dir, make_env, write_commands, read_ledger):
         """Ops with module='core' are handled by the kernel itself."""
@@ -211,17 +214,17 @@ class TestRouting:
         assert len(ledger) == 1
         assert ledger[0]["module"] == "cb"
 
-    def test_opt_missing_optimizer_fails(self, run_dir, make_env, write_commands, read_ledger):
-        """set_params on opt without an optimizer produces failed."""
+    def test_opt_without_mutable_state_fails(self, run_dir, make_env, write_commands, read_ledger):
+        """set_params on opt without a MutableState produces failed."""
         write_commands({"module": "opt", "op": "set_params", "params": {"lr": 0.1}})
         kernel = HotKernel(run_dir, debounce_steps=1)
-        env = make_env(step=1)  # no optimizer
+        env = make_env(step=1)  # no mutable_state
         kernel.apply(env, ["step"])
 
         ledger = read_ledger()
         assert len(ledger) == 1
         assert ledger[0]["decision"] == "failed"
-        assert "missing_optimizer" in (ledger[0].get("error") or "")
+        assert "no_mutable_state" in (ledger[0].get("error") or "")
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +268,11 @@ class TestLedgerCorrectness:
 
     def test_required_fields_populated(self, run_dir, make_env, write_commands, read_ledger):
         """step, event, source, decision fields are present in every ledger record."""
-        write_commands({"module": "opt", "op": "enable", "id": "a"})
-        kernel = HotKernel(run_dir, debounce_steps=1)
-        env = make_env(step=42, optimizer=_mock_optimizer())
+        optimizer = _mock_optimizer()
+        ms = mutable_state(optimizer_actuators(optimizer))
+        write_commands({"module": "opt", "op": "set_params", "params": {"lr": 0.005}})
+        kernel = HotKernel(run_dir, debounce_steps=1, mutable_state=ms)
+        env = make_env(step=42, optimizer=optimizer)
         kernel.apply(env, ["on_batch_end"])
 
         ledger = read_ledger()
@@ -282,8 +287,8 @@ class TestLedgerCorrectness:
     def test_failure_includes_error_text(self, run_dir, make_env, write_commands, read_ledger):
         """Failed ops have error text in the ledger."""
         write_commands({"module": "opt", "op": "set_params", "params": {"lr": 0.1}})
-        kernel = HotKernel(run_dir, debounce_steps=1)
-        env = make_env(step=1)  # no optimizer -> failure
+        kernel = HotKernel(run_dir, debounce_steps=1)  # no mutable_state -> failure
+        env = make_env(step=1)
         kernel.apply(env, ["step"])
 
         ledger = read_ledger()
@@ -298,9 +303,9 @@ class TestLedgerCorrectness:
 # ---------------------------------------------------------------------------
 
 class TestUnknownModule:
-    def test_unknown_module_fails(self, run_dir, make_env, write_commands, read_ledger):
-        """Op with an unknown module is recorded as failed with error text."""
-        write_commands({"module": "xyz", "op": "enable", "id": "thing"})
+    def test_unknown_module_without_mutable_state_fails(self, run_dir, make_env, write_commands, read_ledger):
+        """Op with an unknown module and no MutableState is recorded as failed."""
+        write_commands({"module": "xyz", "op": "set_params", "params": {"key": "thing", "value": 1}})
         kernel = HotKernel(run_dir, debounce_steps=1)
         env = make_env(step=1)
         kernel.apply(env, ["step"])
@@ -308,8 +313,7 @@ class TestUnknownModule:
         ledger = read_ledger()
         assert len(ledger) == 1
         assert ledger[0]["decision"] == "failed"
-        assert "unknown_module" in ledger[0]["error"]
-        assert "xyz" in ledger[0]["error"]
+        assert "no_mutable_state" in ledger[0]["error"]
 
     def test_unknown_module_still_produces_ledger_record(self, run_dir, make_env, write_commands, read_ledger):
         """Unknown modules still get a ledger entry with correct fields."""

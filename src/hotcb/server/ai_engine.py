@@ -147,9 +147,10 @@ class LLMAutopilotEngine:
     cadence control, cost tracking, and action history.
     """
 
-    def __init__(self, run_dir: str, config: Optional[AIConfig] = None):
+    def __init__(self, run_dir: str, config: Optional[AIConfig] = None, autopilot_config: Any = None):
         self._run_dir = run_dir
         self.config = config or AIConfig()
+        self._autopilot_config = autopilot_config  # AutopilotConfig or None
         self.state = AIState(max_runs=self.config.max_runs)
         self._decisions: List[AIDecision] = []
         self._total_cost: float = 0.0
@@ -157,6 +158,17 @@ class LLMAutopilotEngine:
         self._last_invoked_step: int = -1
         self._enabled: bool = True
         self._last_step_with_metrics: int = 0
+
+        # Resolve cadence params from config (AutopilotConfig if available)
+        self._min_interval = 10
+        self._max_wait = 200
+        if self._autopilot_config is not None:
+            self._min_interval = getattr(self._autopilot_config, "ai_min_interval", 10)
+            self._max_wait = getattr(self._autopilot_config, "ai_max_wait", 200)
+            ai_cadence = getattr(self._autopilot_config, "ai_default_cadence", None)
+            if ai_cadence is not None and self.config.cadence == 50:
+                # Only override if user hasn't explicitly set cadence in AIConfig
+                self.config.cadence = ai_cadence
 
         # Load persisted state if exists
         self.load_state()
@@ -221,8 +233,8 @@ class LLMAutopilotEngine:
         if force:
             return True
 
-        # Minimum cooldown: 10 steps between invocations
-        if step - self._last_invoked_step < 10:
+        # Minimum cooldown between invocations (from config)
+        if step - self._last_invoked_step < self._min_interval:
             return False
 
         # On-alert: any alert fires
@@ -320,18 +332,27 @@ class LLMAutopilotEngine:
             cost_usd=cost,
         )
 
-        # Process next_check
+        # Process next_check — cap all values to prevent exponential sleep
         nc = parsed["next_check"]
         nc_mode = nc.get("mode", "periodic")
+        max_wait = max(self.config.cadence * 4, self._max_wait)  # never wait more than 4x cadence or configured max
         if nc_mode == "at_step":
-            self.state.next_check_step = nc.get("step")
+            requested_step = nc.get("step", step + self.config.cadence)
+            # Cap: don't let AI schedule more than max_wait steps ahead
+            capped_step = min(requested_step, step + max_wait)
+            self.state.next_check_step = capped_step
         elif nc_mode == "in_n_steps":
-            self.state.next_check_step = step + nc.get("n", 50)
+            n = min(nc.get("n", 50), max_wait)
+            self.state.next_check_step = step + n
         elif nc_mode == "on_next_alert":
-            self.state.next_check_step = None  # will fire on next alert
-            self.state.cadence_override = 999999  # effectively disable periodic
+            # Still set a periodic fallback so we don't sleep forever
+            self.state.next_check_step = step + max_wait
+            self.state.cadence_override = max_wait
         elif nc_mode == "periodic":
             interval = nc.get("interval", self.config.cadence)
+            # Cap periodic interval
+            interval = min(interval, max_wait)
+            interval = max(interval, self._min_interval)  # minimum from config
             self.state.cadence_override = interval
             self.state.next_check_step = None
 

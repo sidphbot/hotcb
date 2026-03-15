@@ -18,8 +18,8 @@ import pytest
 
 from hotcb.kernel import HotKernel
 from hotcb.modules.cb import CallbackModule, _capture_source
-from hotcb.modules.opt import HotOptController
-from hotcb.modules.loss import HotLossController
+from hotcb.actuators import optimizer_actuators, loss_actuators, mutable_state, ApplyResult
+from hotcb.actuators.actuator import ActuatorType, HotcbActuator
 from hotcb.ops import HotOp
 from hotcb.cli import (
     cmd_status,
@@ -169,93 +169,124 @@ class TestReplaySourceCaptureFallback:
 # ===========================================================================
 
 class TestTracebackInModuleResult:
-    """When set_params fails with an exception, ModuleResult should carry traceback."""
+    """When set_params fails with an exception, error info is recorded."""
 
-    def test_opt_set_params_failure_has_traceback(self):
-        """HotOptController.set_params failure produces a result with traceback."""
-        ctrl = HotOptController()
-        # Passing group index that doesn't exist on a single-group optimizer
-        optimizer = _mock_optimizer(lr=0.01)
-        env = {"optimizer": optimizer}
-        op = HotOp(module="opt", op="set_params", params={"group": "99", "lr": 0.001})
-        result = ctrl.apply_op(op, env)
-        assert result.decision == "failed"
+    def test_opt_apply_fn_failure_has_error(self):
+        """Optimizer actuator apply_fn failure produces error in ApplyResult."""
+        def _bad_apply(value, env):
+            raise RuntimeError("gpu exploded")
+
+        bad_act = HotcbActuator(
+            param_key="bad_lr",
+            type=ActuatorType.FLOAT,
+            apply_fn=_bad_apply,
+            min_value=0.0,
+            max_value=1.0,
+            current_value=0.01,
+        )
+        from hotcb.actuators.state import MutableState
+        ms = MutableState([bad_act])
+        result = ms.apply("bad_lr", 0.001, {}, step=1)
+        assert not result.success
         assert result.error is not None
-        assert result.traceback is not None
-        assert "Traceback" in result.traceback
+        assert "gpu exploded" in result.error
 
-    def test_loss_set_params_failure_has_traceback(self):
-        """HotLossController.set_params failure produces a result with traceback."""
-        ctrl = HotLossController()
-        # Give a loss_state where _apply_params will raise due to non-dict value
-        # We force an error by patching the loss_state to raise on setdefault
-        class BadLossState(dict):
-            def setdefault(self, key, default=None):
-                raise TypeError("intentional error for test")
+    def test_loss_apply_fn_failure_has_error(self):
+        """Loss actuator apply_fn failure produces error in ApplyResult."""
+        def _bad_apply(value, env):
+            raise TypeError("intentional error for test")
 
-        env = {"loss_state": BadLossState()}
-        op = HotOp(module="loss", op="set_params", params={"kl_w": 0.5})
-        result = ctrl.apply_op(op, env)
-        assert result.decision == "failed"
-        assert result.error is not None
-        assert result.traceback is not None
-        assert "Traceback" in result.traceback
+        bad_act = HotcbActuator(
+            param_key="bad_weight",
+            type=ActuatorType.FLOAT,
+            apply_fn=_bad_apply,
+            min_value=0.0,
+            max_value=100.0,
+            current_value=1.0,
+        )
+        from hotcb.actuators.state import MutableState
+        ms = MutableState([bad_act])
+        result = ms.apply("bad_weight", 0.5, {}, step=1)
+        assert not result.success
+        assert "intentional error" in result.error
 
-    def test_kernel_ledger_has_traceback_on_opt_failure(
+    def test_kernel_ledger_has_error_on_opt_failure(
         self, run_dir, make_env, write_commands, read_ledger,
     ):
-        """When opt set_params fails through the kernel, ledger entry has traceback."""
+        """When opt set_params fails through the kernel, ledger entry has error."""
+        def _bad_apply(value, env):
+            raise RuntimeError("gpu exploded")
+
+        bad_act = HotcbActuator(
+            param_key="lr",
+            type=ActuatorType.FLOAT,
+            apply_fn=_bad_apply,
+            min_value=0.0,
+            max_value=1.0,
+            current_value=0.01,
+        )
+        ms = mutable_state([bad_act])
+
         write_commands({
             "module": "opt",
             "op": "set_params",
-            "params": {"group": "99", "lr": 0.001},
+            "params": {"key": "lr", "value": 0.001},
         })
-        kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
-        optimizer = _mock_optimizer(lr=0.01)
-        env = make_env(step=1, optimizer=optimizer)
+        kernel = HotKernel(run_dir=run_dir, debounce_steps=1, mutable_state=ms)
+        env = make_env(step=1)
         kernel.apply(env, ["train_step_end"])
 
         ledger = read_ledger()
         assert len(ledger) == 1
         assert ledger[0]["decision"] == "failed"
-        assert ledger[0]["traceback"] is not None
-        assert "Traceback" in ledger[0]["traceback"]
+        assert ledger[0]["error"] is not None
+        assert "gpu exploded" in ledger[0]["error"]
 
-    def test_kernel_ledger_has_traceback_on_loss_failure(
+    def test_kernel_ledger_has_error_on_loss_failure(
         self, run_dir, make_env, write_commands, read_ledger,
     ):
-        """When loss set_params fails through the kernel, ledger entry has traceback."""
+        """When loss set_params fails through the kernel, ledger entry has error."""
+        def _bad_apply(value, env):
+            raise TypeError("intentional error for test")
 
-        class BadLossState(dict):
-            def setdefault(self, key, default=None):
-                raise TypeError("intentional error for test")
+        bad_act = HotcbActuator(
+            param_key="kl",
+            type=ActuatorType.FLOAT,
+            apply_fn=_bad_apply,
+            min_value=0.0,
+            max_value=100.0,
+            current_value=1.0,
+        )
+        ms = mutable_state([bad_act])
 
         write_commands({
             "module": "loss",
             "op": "set_params",
-            "params": {"kl_w": 0.5},
+            "params": {"key": "kl", "value": 0.5},
         })
-        kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
-        env = make_env(step=1, loss_state=BadLossState())
+        kernel = HotKernel(run_dir=run_dir, debounce_steps=1, mutable_state=ms)
+        env = make_env(step=1)
         kernel.apply(env, ["train_step_end"])
 
         ledger = read_ledger()
         assert len(ledger) == 1
         assert ledger[0]["decision"] == "failed"
-        assert ledger[0]["traceback"] is not None
-        assert "Traceback" in ledger[0]["traceback"]
+        assert ledger[0]["error"] is not None
+        assert "intentional error" in ledger[0]["error"]
 
     def test_successful_op_has_no_traceback(
         self, run_dir, make_env, write_commands, read_ledger,
     ):
         """Successful ops should have traceback=None in the ledger."""
+        optimizer = _mock_optimizer(lr=0.01)
+        ms = mutable_state(optimizer_actuators(optimizer))
+
         write_commands({
             "module": "opt",
             "op": "set_params",
             "params": {"lr": 0.001},
         })
-        kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
-        optimizer = _mock_optimizer(lr=0.01)
+        kernel = HotKernel(run_dir=run_dir, debounce_steps=1, mutable_state=ms)
         env = make_env(step=1, optimizer=optimizer)
         kernel.apply(env, ["train_step_end"])
 
