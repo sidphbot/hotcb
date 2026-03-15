@@ -44,8 +44,8 @@ Ops are routed by their `module` field:
 | Module | Controller | Purpose |
 |--------|-----------|---------|
 | `cb` | `CallbackModule` | Instrumentation callbacks |
-| `opt` | `HotOptController` | Optimizer/scheduler control |
-| `loss` | `HotLossController` | Loss weight/term/ramp control |
+| `opt`, `loss`, custom | Default stream → `MutableState` | Optimizer, loss, and custom parameter control |
+| `tune` | `HotTuneController` | Online constrained HPO |
 | `core` | Kernel itself | Freeze, unfreeze, status |
 
 ## The Three Streams

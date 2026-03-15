@@ -64,7 +64,7 @@ class ValidateRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _cmd_path(request: Request) -> str:
-    run_dir: str = request.app.state.run_dir
+    run_dir: str = request.app.state.config.run_dir
     return os.path.join(run_dir, "hotcb.commands.jsonl")
 
 
@@ -93,7 +93,7 @@ async def loss_set(body: LossSetRequest, request: Request):
 @router.get("/loss/params")
 async def loss_params(request: Request):
     """Return current loss weight values from the latest metrics or applied ledger."""
-    run_dir: str = request.app.state.run_dir
+    run_dir: str = request.app.state.config.run_dir
 
     # Strategy 1: read from latest metrics (most up-to-date)
     metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")
@@ -162,7 +162,7 @@ async def tune_mode(body: TuneModeRequest, request: Request):
 @router.get("/cb/list")
 async def cb_list(request: Request):
     """Return list of registered callbacks."""
-    run_dir: str = request.app.state.run_dir
+    run_dir: str = request.app.state.config.run_dir
     applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
 
     # Start with server-side registry
@@ -266,7 +266,7 @@ async def cb_unload(cb_id: str, request: Request):
 
 @router.post("/freeze")
 async def freeze(body: FreezeRequest, request: Request):
-    run_dir: str = request.app.state.run_dir
+    run_dir: str = request.app.state.config.run_dir
     freeze_path = os.path.join(run_dir, "hotcb.freeze.json")
     cfg = {
         "mode": body.mode,
@@ -291,7 +291,7 @@ async def schedule(body: ScheduleRequest, request: Request):
     }
     if body.params:
         cmd["params"] = body.params
-    run_dir: str = request.app.state.run_dir
+    run_dir: str = request.app.state.config.run_dir
     recipe_path = os.path.join(run_dir, "hotcb.recipe.jsonl")
     append_jsonl(recipe_path, cmd)
     # Ensure recipe editor picks up the new entry on next fetch
@@ -411,7 +411,7 @@ async def chat(body: ChatRequest, request: Request):
 @router.post("/applied/save-as-recipe")
 async def save_applied_as_recipe(request: Request):
     """Convert applied mutation history into a recipe file."""
-    run_dir: str = request.app.state.run_dir
+    run_dir: str = request.app.state.config.run_dir
     applied_path = os.path.join(run_dir, "hotcb.applied.jsonl")
     recipe_path = os.path.join(run_dir, "hotcb.recipe.jsonl")
 

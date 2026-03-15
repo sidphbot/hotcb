@@ -173,11 +173,12 @@ class AutopilotEngine:
     - ``"ai_auto"``    — LLM proposes and applies (with safety guards)
     """
 
-    def __init__(self, run_dir: str, mode: str = "off") -> None:
+    def __init__(self, run_dir: str, mode: str = "off", config: Any = None) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(f"Invalid mode: {mode!r}")
         self._run_dir = run_dir
         self._mode = mode
+        self._config = config  # AutopilotConfig or None (uses hardcoded defaults)
         self._rules: dict[str, AutopilotRule] = {}
         self._history: list[AutopilotAction] = []
         # Per-metric history for condition evaluation
@@ -189,9 +190,9 @@ class AutopilotEngine:
         self._ai_engine: Any = None
 
     @classmethod
-    def with_default_guidelines(cls, run_dir: str, mode: str = "off") -> "AutopilotEngine":
+    def with_default_guidelines(cls, run_dir: str, mode: str = "off", config: Any = None) -> "AutopilotEngine":
         """Create engine pre-loaded with community default guidelines."""
-        engine = cls(run_dir=run_dir, mode=mode)
+        engine = cls(run_dir=run_dir, mode=mode, config=config)
         from .guidelines import DEFAULT_GUIDELINES_PATH
         if os.path.exists(DEFAULT_GUIDELINES_PATH):
             engine.load_guidelines(DEFAULT_GUIDELINES_PATH)
@@ -359,10 +360,18 @@ class AutopilotEngine:
 
         elif rule.condition == "divergence":
             history = self._metric_history.get(rule.metric_name, [])
-            return _eval_divergence(history, rule.params)
+            # Merge config defaults into rule params (rule params take precedence)
+            params = dict(rule.params)
+            if "threshold" not in params and self._config is not None:
+                params["threshold"] = self._config.divergence_threshold
+            return _eval_divergence(history, params)
 
         elif rule.condition == "overfitting":
-            return _eval_overfitting(metrics, rule.params)
+            # Merge config defaults into rule params (rule params take precedence)
+            params = dict(rule.params)
+            if "ratio_threshold" not in params and self._config is not None:
+                params["ratio_threshold"] = self._config.ratio_threshold
+            return _eval_overfitting(metrics, params)
 
         elif rule.condition == "custom":
             expr = rule.params.get("expression", "")

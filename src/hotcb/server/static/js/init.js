@@ -11,6 +11,16 @@ function dismissChartWaiting() {
 }
 
 async function initialLoad() {
+  // Fetch centralized config before other init
+  var cfg = await api('GET', '/api/config');
+  if (cfg) {
+    S.config = cfg;
+    // Build dynamic controls from config
+    if (cfg.controls && cfg.controls.length) {
+      buildControls(cfg.controls);
+    }
+  }
+
   // Status
   var status = await api('GET', '/api/status');
   if (status) {
@@ -18,8 +28,8 @@ async function initialLoad() {
     if (status.run_dir) S.runs = [status.run_dir];
   }
 
-  // Metric history
-  var hist = await api('GET', '/api/metrics/history?last_n=2000');
+  // Metric history — load full run for external projects (LTTB handles rendering)
+  var hist = await api('GET', '/api/metrics/history?last_n=50000');
   if (hist && hist.records && hist.records.length > 0) {
     dismissChartWaiting();
     hist.records.forEach(function(rec) {
@@ -72,34 +82,26 @@ async function initialLoad() {
   // Restore controls from server state (overrides stale localStorage)
   var ctrlState = await api('GET', '/api/state/controls');
   if (ctrlState) {
-    // Sync sliders from latest metrics
-    var m = ctrlState.latest_metrics || {};
-    if (m.lr && m.lr > 0) {
-      var lrSlider = document.getElementById('knobLr');
-      var lrDisplay = document.getElementById('knobLrVal');
-      if (lrSlider && lrDisplay) {
-        lrSlider.value = Math.log10(m.lr);
-        lrDisplay.value = m.lr.toExponential(2);
-      }
+    // Build/rebuild controls from live MutableState data
+    if (ctrlState.controls && ctrlState.controls.length) {
+      buildControls(ctrlState.controls);
+      if (S.config) S.config.controls = ctrlState.controls;
     }
-    if (m.weight_decay && m.weight_decay > 0) {
-      var wdSlider = document.getElementById('knobWd');
-      var wdDisplay = document.getElementById('knobWdVal');
-      if (wdSlider && wdDisplay) {
-        wdSlider.value = Math.log10(m.weight_decay);
-        wdDisplay.value = m.weight_decay.toExponential(2);
-      }
+
+    // Sync sliders from latest metrics using dynamic sync
+    var m = ctrlState.latest_metrics || {};
+    if (Object.keys(m).length > 0) {
+      syncSlidersFromApplied(m);
     }
     // Sync from last applied opt params as fallback
     var op = ctrlState.last_opt_params || {};
-    if (!m.lr && op.lr && op.lr > 0) {
-      var lrSlider = document.getElementById('knobLr');
-      var lrDisplay = document.getElementById('knobLrVal');
-      if (lrSlider && lrDisplay) {
-        lrSlider.value = Math.log10(op.lr);
-        lrDisplay.value = op.lr.toExponential(2);
-      }
+    if (Object.keys(op).length > 0) {
+      syncSlidersFromApplied(op);
     }
+    if (ctrlState.last_loss_params && Object.keys(ctrlState.last_loss_params).length > 0) {
+      syncSlidersFromApplied(ctrlState.last_loss_params);
+    }
+
     // Sync training config
     var rc = ctrlState.run_config || {};
     if (rc.config_id) {
@@ -128,12 +130,13 @@ async function initialLoad() {
     }
   }
 
-  // Load training capabilities and adapt controls
+  // Load training capabilities (informational)
   loadCapabilities();
 
   // Periodic updates
   startForecastPolling();
-  S._alertInterval = setInterval(fetchAlerts, 15000);
+  var _alertPollMs = (S.config && S.config.ui) ? S.config.ui.alert_poll_interval : 15000;
+  S._alertInterval = setInterval(fetchAlerts, _alertPollMs);
 
   // Show tour for first-time users (with delay to let UI settle)
   if (shouldShowTour()) {
@@ -177,6 +180,15 @@ async function initialLoad() {
   initCompare();
   createMetricsChart();
   initStepRangeControls();
+  // Normalize toggle
+  var normBtn = document.getElementById('btnNormalize');
+  if (normBtn) {
+    normBtn.addEventListener('click', function() {
+      _chartNormalize = !_chartNormalize;
+      normBtn.classList.toggle('btn-accent', _chartNormalize);
+      updateChart();
+    });
+  }
   initialLoad();
   connectWS();
 
@@ -198,19 +210,11 @@ async function initialLoad() {
     if (savedState.pinnedMetrics && savedState.pinnedMetrics.length) {
       S._pendingPinnedMetrics = savedState.pinnedMetrics;
     }
-    if (savedState.knobs) {
-      if (savedState.knobs.lr) {
-        var lr = document.getElementById('knobLr');
-        if (lr) { lr.value = savedState.knobs.lr; lr.dispatchEvent(new Event('input')); }
-      }
-      if (savedState.knobs.wd) {
-        var wd = document.getElementById('knobWd');
-        if (wd) { wd.value = savedState.knobs.wd; wd.dispatchEvent(new Event('input')); }
-      }
-    }
+    // Knob state is now handled by dynamic controls from server
   }
 
   // Persist UI state periodically and before page unload
-  S._saveStateInterval = setInterval(saveUIState, 5000);
+  var _stateSaveMs = (S.config && S.config.ui) ? S.config.ui.state_save_interval : 5000;
+  S._saveStateInterval = setInterval(saveUIState, _stateSaveMs);
   window.addEventListener('beforeunload', saveUIState);
 })();

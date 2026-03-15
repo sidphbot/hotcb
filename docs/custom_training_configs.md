@@ -85,15 +85,15 @@ names and creates chart lines for each.
 import os, time, torch, torch.nn as nn
 from hotcb.kernel import HotKernel
 from hotcb.metrics import MetricsCollector
-from hotcb.actuators import OptimizerActuator
+from hotcb.actuators import optimizer_actuators, mutable_state
 
 def pytorch_training(run_dir, max_steps, step_delay, stop_event):
     mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
-    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
-    kernel.register_actuator("opt", OptimizerActuator())
 
     model = nn.Linear(10, 2)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    ms = mutable_state(optimizer_actuators(optimizer))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc, mutable_state=ms)
     loss_fn = nn.CrossEntropyLoss()
 
     for step in range(1, max_steps + 1):
@@ -137,12 +137,11 @@ import pytorch_lightning as pl
 from hotcb.kernel import HotKernel
 from hotcb.metrics import MetricsCollector
 from hotcb.adapters.lightning import HotCBLightning
-from hotcb.actuators import OptimizerActuator
 
 def lightning_training(run_dir, max_steps, step_delay, stop_event):
     mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
     kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
-    kernel.register_actuator("opt", OptimizerActuator())
+    # Optimizer actuators auto-discovered by HotCBLightning adapter
 
     model = MyLightningModule()
 
@@ -164,12 +163,11 @@ from transformers import Trainer, TrainingArguments
 from hotcb.kernel import HotKernel
 from hotcb.metrics import MetricsCollector
 from hotcb.adapters.hf import HotCBHFCallback
-from hotcb.actuators import OptimizerActuator
 
 def hf_training(run_dir, max_steps, step_delay, stop_event):
     mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
     kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
-    kernel.register_actuator("opt", OptimizerActuator())
+    # Optimizer actuators auto-discovered by HotCBHFCallback adapter
 
     model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
 

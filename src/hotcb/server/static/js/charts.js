@@ -12,8 +12,11 @@ var _highlightedMutationStep = null;
 // Step range control: 'all' | 'last200' | 'last500' | {min, max}
 var _chartStepRange = 'all';
 
+// Y-axis normalization: when enabled, each metric is normalized to [0,1]
+var _chartNormalize = false;
+
 // Max points to render per dataset (avoids sluggish charts on very long runs)
-var _maxRenderPoints = 2000;
+var _maxRenderPoints = (S.config && S.config.chart) ? S.config.chart.max_render_points : 2000;
 
 /**
  * LTTB (Largest-Triangle-Three-Buckets) downsampling.
@@ -373,10 +376,47 @@ function createMetricsChart() {
                    borderColor: getComputedStyle(document.documentElement).getPropertyValue('--border-bright').trim() || '#2a4060', borderWidth:1,
                    titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:11},
                    usePointStyle: true, boxWidth: 8, boxHeight: 8,
-                   intersect: false, mode: 'nearest', axis: 'x', position: 'rightOfCursor' }
+                   intersect: false, mode: 'nearest', axis: 'x', position: 'rightOfCursor',
+                   itemSort: function(a, b, data) {
+                     // Sort tooltip items by Y-pixel distance to cursor (TensorBoard-style)
+                     var chart = a.chart || (data && data.chart);
+                     var cursorY = 0;
+                     if (chart && chart._lastEvent) cursorY = chart._lastEvent.y;
+                     var ay = a.element ? a.element.y : 0;
+                     var by = b.element ? b.element.y : 0;
+                     return Math.abs(ay - cursorY) - Math.abs(by - cursorY);
+                   },
+                   callbacks: {
+                     label: function(ctx) {
+                       var ds = ctx.dataset;
+                       var label = ds.label || '';
+                       // Skip internal datasets (confidence bands)
+                       if (label.startsWith('_')) return null;
+                       var rawY = ctx.parsed.y;
+                       // When normalized, show both normalized and raw values
+                       if (_chartNormalize) {
+                         var metricName = label.replace(/ forecast$/, '').replace(/ post-change$/, '');
+                         var rawPts = S.metricsData[metricName];
+                         if (rawPts && rawPts.length > 0) {
+                           // Find raw value at nearest step
+                           var step = ctx.parsed.x;
+                           var rawVal = null;
+                           for (var i = 0; i < rawPts.length; i++) {
+                             if (rawPts[i].step >= step) { rawVal = rawPts[i].value; break; }
+                             rawVal = rawPts[i].value;
+                           }
+                           if (rawVal !== null) {
+                             return label + ': ' + fmtNum(rawVal) + ' (norm: ' + rawY.toFixed(3) + ')';
+                           }
+                         }
+                       }
+                       return label + ': ' + fmtNum(rawY);
+                     }
+                   }
+        }
       },
       interaction: { mode: 'nearest', axis: 'x', intersect: false },
-      elements: { point: {radius:0, hoverRadius:5, hitRadius:10}, line: {borderWidth:1.5, tension:0.15} }
+      elements: { point: {radius:0, hoverRadius:5, hitRadius:10}, line: {borderWidth:1.5, tension: (S.config && S.config.chart) ? S.config.chart.line_tension : 0.15} }
     }
   });
 }
@@ -399,19 +439,37 @@ function updateChart() {
     var pts = S.metricsData[name] || [];
     var color = getColor(name);
 
+    // Compute per-metric min/max for normalization
+    var metricMin = Infinity, metricMax = -Infinity;
+    if (_chartNormalize && pts.length > 0) {
+      pts.forEach(function(p) {
+        if (p.value < metricMin) metricMin = p.value;
+        if (p.value > metricMax) metricMax = p.value;
+      });
+      if (metricMax === metricMin) { metricMin -= 0.5; metricMax += 0.5; }
+    }
+    var _normFn = (_chartNormalize && metricMax !== metricMin)
+      ? function(v) { return (v - metricMin) / (metricMax - metricMin); }
+      : function(v) { return v; };
+
     // Live data line (LTTB-downsampled for rendering performance)
-    var chartPts = pts.map(function(p) { return {x: p.step, y: p.value}; });
+    var chartPts = pts.map(function(p) { return {x: p.step, y: _normFn(p.value)}; });
     chartPts = _lttbDownsample(chartPts, _maxRenderPoints);
+    var _cfgTension = (S.config && S.config.chart) ? S.config.chart.line_tension : 0.15;
+    var _cfgForecastDash = (S.config && S.config.chart) ? S.config.chart.forecast_dash : [6, 3];
+    var _cfgMutationDash = (S.config && S.config.chart) ? S.config.chart.mutation_dash : [3, 4];
+
     datasets.push({
       label: name,
       data: chartPts,
       borderColor: color,
       backgroundColor: 'transparent',
-      tension: 0.15,
+      tension: _cfgTension,
     });
 
     var lastStep = pts.length ? pts[pts.length - 1].step : 0;
     var lastVal = pts.length ? pts[pts.length - 1].value : null;
+    var lastValNorm = lastVal !== null ? _normFn(lastVal) : null;
     var cache = _forecastCache[name];
     var showOverlays = S.focusMetric === name || (S.pinnedMetrics && S.pinnedMetrics.has(name));
 
@@ -421,38 +479,38 @@ function updateChart() {
         && lastStep > 0 && lastVal !== null
         && cache.forecast.steps && cache.forecast.steps[0] <= lastStep + 50) {
       var fc = cache.forecast;
-      var fcPts = [{x: lastStep, y: lastVal}];  // Connect to last actual point
-      fc.values.forEach(function(v, i) { fcPts.push({x: fc.steps[i], y: v}); });
+      var fcPts = [{x: lastStep, y: lastValNorm}];  // Connect to last actual point
+      fc.values.forEach(function(v, i) { fcPts.push({x: fc.steps[i], y: _normFn(v)}); });
       datasets.push({
         label: name + ' forecast',
         data: fcPts,
         borderColor: color,
-        borderDash: [6, 3],
+        borderDash: _cfgForecastDash,
         backgroundColor: 'transparent',
-        tension: 0.15,
+        tension: _cfgTension,
         borderWidth: 1.2,
         pointRadius: 0,
       });
       // Confidence band
       if (fc.lower && fc.upper) {
-        var loPts = [{x: lastStep, y: lastVal}];
-        var hiPts = [{x: lastStep, y: lastVal}];
-        fc.lower.forEach(function(v, i) { loPts.push({x: fc.steps[i], y: v}); });
-        fc.upper.forEach(function(v, i) { hiPts.push({x: fc.steps[i], y: v}); });
+        var loPts = [{x: lastStep, y: lastValNorm}];
+        var hiPts = [{x: lastStep, y: lastValNorm}];
+        fc.lower.forEach(function(v, i) { loPts.push({x: fc.steps[i], y: _normFn(v)}); });
+        fc.upper.forEach(function(v, i) { hiPts.push({x: fc.steps[i], y: _normFn(v)}); });
         datasets.push({
           label: '_' + name + '_lo',
           data: loPts,
           borderColor: 'transparent',
           backgroundColor: hexToRgba(color, 0.06),
           fill: '+1',
-          pointRadius: 0, tension: 0.15,
+          pointRadius: 0, tension: _cfgTension,
         });
         datasets.push({
           label: '_' + name + '_hi',
           data: hiPts,
           borderColor: 'transparent',
           backgroundColor: 'transparent',
-          pointRadius: 0, tension: 0.15,
+          pointRadius: 0, tension: _cfgTension,
         });
       }
     }
@@ -463,15 +521,15 @@ function updateChart() {
       var mu = cache.mutation;
       var inDataRange = pts.length > 0 && mu.fromStep >= pts[0].step && mu.fromStep <= pts[pts.length - 1].step;
       if (inDataRange) {
-        var muPts = [{x: mu.fromStep, y: mu.fromVal}];
-        mu.values.forEach(function(v, i) { muPts.push({x: mu.steps[i], y: v}); });
+        var muPts = [{x: mu.fromStep, y: _normFn(mu.fromVal)}];
+        mu.values.forEach(function(v, i) { muPts.push({x: mu.steps[i], y: _normFn(v)}); });
         datasets.push({
           label: name + ' post-change',
           data: muPts,
           borderColor: 'rgba(51,204,221,0.7)',
-          borderDash: [3, 4],
+          borderDash: _cfgMutationDash,
           backgroundColor: 'transparent',
-          tension: 0.15,
+          tension: _cfgTension,
           borderWidth: 1.2,
           pointRadius: 0,
         });
@@ -483,6 +541,14 @@ function updateChart() {
 
   // Apply step range to x-axis
   _applyChartStepRange();
+
+  // Update Y-axis title for normalization mode
+  var yOpts = S.chartInstance.options.scales.y;
+  if (_chartNormalize) {
+    yOpts.title = {display: true, text: 'Normalized [0,1]', color: '#7a8fa3', font: {size: 10}};
+  } else {
+    yOpts.title = {display: false};
+  }
 
   S.chartInstance.update('none');
 
@@ -605,6 +671,9 @@ var _commonMetricPatterns = [
   'precision', 'recall', 'auc', 'val_auc', 'bleu'
 ];
 
+// Metrics shown by default on chart — losses and key metric only
+var _defaultOnPatterns = ['loss', 'val_loss', 'train_loss'];
+
 function _isCommonMetric(name) {
   var lower = name.toLowerCase();
   for (var i = 0; i < _commonMetricPatterns.length; i++) {
@@ -645,7 +714,16 @@ function updateMetricToggles() {
   S.metricNames.forEach(function(name) {
     currentCount++;
     if (!(name in _metricToggleState)) {
-      _metricToggleState[name] = true;  // default checked
+      // Default: only show losses and key metric; others off
+      var lower = name.toLowerCase();
+      var isDefault = false;
+      for (var di = 0; di < _defaultOnPatterns.length; di++) {
+        if (lower === _defaultOnPatterns[di] || lower.indexOf(_defaultOnPatterns[di]) !== -1) { isDefault = true; break; }
+      }
+      // Also check AI key metric
+      var aiKeyMetricEl = document.getElementById('aiKeyMetric');
+      if (aiKeyMetricEl && aiKeyMetricEl.value === name) isDefault = true;
+      _metricToggleState[name] = isDefault;
     }
   });
 
@@ -952,6 +1030,10 @@ function updateSingleMetricCard(name) {
   var color = getColor(name);
   var pts = S.metricsData[name] || [];
 
+  var _cfgTension = (S.config && S.config.chart) ? S.config.chart.line_tension : 0.15;
+  var _cfgForecastDash = (S.config && S.config.chart) ? S.config.chart.forecast_dash : [6, 3];
+  var _cfgMutationDash = (S.config && S.config.chart) ? S.config.chart.mutation_dash : [3, 4];
+
   var chartPts = pts.map(function(p) { return {x: p.step, y: p.value}; });
   chartPts = _lttbDownsample(chartPts, 500);  // mini cards need fewer points
   datasets.push({
@@ -959,7 +1041,7 @@ function updateSingleMetricCard(name) {
     data: chartPts,
     borderColor: color,
     backgroundColor: 'transparent',
-    tension: 0.15,
+    tension: _cfgTension,
   });
 
   var lastStep = pts.length ? pts[pts.length - 1].step : 0;
@@ -974,8 +1056,8 @@ function updateSingleMetricCard(name) {
     datasets.push({
       label: 'forecast',
       data: fcPts,
-      borderColor: color, borderDash: [6, 3],
-      backgroundColor: 'transparent', tension: 0.15, borderWidth: 1.2, pointRadius: 0,
+      borderColor: color, borderDash: _cfgForecastDash,
+      backgroundColor: 'transparent', tension: _cfgTension, borderWidth: 1.2, pointRadius: 0,
     });
   }
 
@@ -987,8 +1069,8 @@ function updateSingleMetricCard(name) {
     datasets.push({
       label: 'post-change',
       data: muPts,
-      borderColor: 'rgba(51,204,221,0.7)', borderDash: [3, 4],
-      backgroundColor: 'transparent', tension: 0.15, borderWidth: 1.2, pointRadius: 0,
+      borderColor: 'rgba(51,204,221,0.7)', borderDash: _cfgMutationDash,
+      backgroundColor: 'transparent', tension: _cfgTension, borderWidth: 1.2, pointRadius: 0,
     });
   }
 
@@ -1041,7 +1123,7 @@ async function fetchAllForecasts() {
     _forecastInFlight = false;
     return;
   }
-  var batchSize = 4;
+  var batchSize = (S.config && S.config.ui) ? S.config.ui.forecast_batch_size : 8;
   for (var i = 0; i < names.length; i += batchSize) {
     var batch = names.slice(i, i + batchSize);
     await Promise.all(batch.map(fetchForecastForMetric));
@@ -1064,13 +1146,14 @@ async function fetchForecastForMetric(name) {
 
 function startForecastPolling() {
   if (_forecastTimer) clearInterval(_forecastTimer);
-  // Poll every 10s as a baseline — new metrics also trigger refresh via onNewMetricsForForecast
+  var _forecastPollMs = (S.config && S.config.ui) ? S.config.ui.forecast_poll_interval : 5000;
+  // Poll at configured interval — new metrics also trigger refresh via onNewMetricsForForecast
   _forecastTimer = setInterval(function() {
     // Only fetch if we have pinned/focused metrics to avoid wasted work
     if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
       fetchAllForecasts();
     }
-  }, 10000);
+  }, _forecastPollMs);
   // Delay initial fetch to let the dashboard settle
   setTimeout(function() {
     if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
@@ -1081,8 +1164,9 @@ function startForecastPolling() {
 
 // Called from websocket when new metrics arrive — trigger forecast refresh
 function onNewMetricsForForecast(maxStep) {
-  // Only trigger every 20 steps, and only if there are pinned/focused metrics
-  if (maxStep - _lastForecastStep >= 20) {
+  // Only trigger every N steps (from config), and only if there are pinned/focused metrics
+  var _forecastCadence = (S.config && S.config.ui) ? S.config.ui.forecast_step_cadence : 10;
+  if (maxStep - _lastForecastStep >= _forecastCadence) {
     _lastForecastStep = maxStep;
     if ((S.pinnedMetrics && S.pinnedMetrics.size > 0) || S.focusMetric) {
       fetchAllForecasts();

@@ -9,6 +9,7 @@ var _manifoldRefreshInterval = null;
 
 function _startManifoldAutoRefresh() {
   if (_manifoldRefreshInterval) return;
+  var _manifoldMs = (S.config && S.config.ui) ? S.config.ui.manifold_refresh_interval : 10000;
   _manifoldRefreshInterval = setInterval(function() {
     var activeSubtab = document.querySelector('[data-subtab].active');
     if (activeSubtab && activeSubtab.dataset.subtab === 'feature-space') {
@@ -16,7 +17,7 @@ function _startManifoldAutoRefresh() {
     } else {
       fetchManifold();
     }
-  }, 10000);
+  }, _manifoldMs);
 }
 
 function _stopManifoldAutoRefresh() {
@@ -36,6 +37,9 @@ function initTabs() {
       area.querySelectorAll('.tab-content[data-tab]').forEach(function(x) { x.classList.remove('active'); });
       var target = area.querySelector('.tab-content[data-tab="' + t.dataset.tab + '"]');
       if (target) target.classList.add('active');
+      // Compare mode: hide right-col panes, show compact status bar
+      document.body.classList.toggle('compare-active-mode', t.dataset.tab === 'compare');
+      if (t.dataset.tab === 'compare') fetchCompareRuns();
       if (t.dataset.tab === 'manifold') {
         fetchManifold();
         _startManifoldAutoRefresh();
@@ -175,7 +179,8 @@ async function fetchRecipe() {
 
 function _startRecipeAutoRefresh() {
   if (_recipeAutoRefresh) return;
-  _recipeAutoRefresh = setInterval(fetchRecipe, 5000);
+  var _recipeMs = (S.config && S.config.ui) ? S.config.ui.recipe_refresh_interval : 5000;
+  _recipeAutoRefresh = setInterval(fetchRecipe, _recipeMs);
 }
 function _stopRecipeAutoRefresh() {
   if (_recipeAutoRefresh) { clearInterval(_recipeAutoRefresh); _recipeAutoRefresh = null; }
@@ -685,7 +690,8 @@ async function fetchAutopilotRules() {
 
 function _startRulesAutoRefresh() {
   if (_rulesAutoRefresh) return;
-  _rulesAutoRefresh = setInterval(fetchAutopilotRules, 5000);
+  var _rulesMs = (S.config && S.config.ui) ? S.config.ui.recipe_refresh_interval : 5000;
+  _rulesAutoRefresh = setInterval(fetchAutopilotRules, _rulesMs);
 }
 function _stopRulesAutoRefresh() {
   if (_rulesAutoRefresh) { clearInterval(_rulesAutoRefresh); _rulesAutoRefresh = null; }
@@ -900,7 +906,12 @@ function initAutopilotRulesEditor() {
 /* Compare Runs                                                      */
 /* ================================================================ */
 var _compareChart = null;
-var _compareRunColorPalette = ['#00d4aa', '#3d9eff', '#ff9833', '#ff4d5e', '#9966ff', '#33dd77', '#ff66aa', '#66ddff', '#aadd33', '#dd66ff'];
+var _compareRunColorPalette = [
+  '#00d4aa', '#3d9eff', '#ff9833', '#ff4d5e', '#9966ff',
+  '#33dd77', '#ff66aa', '#66ddff', '#aadd33', '#dd66ff',
+  '#ff8800', '#00aaff', '#cc44cc', '#44cc88', '#ffcc00',
+  '#ee5577', '#77ccee', '#bbaa33', '#aa55ee', '#55bbaa',
+];
 var _compareRunColorMap = {};  // runId -> color (stable mapping)
 var _selectedCompareRuns = new Set();
 var _compareAllData = {};  // runId -> records[]
@@ -908,6 +919,9 @@ var _compareMetricNames = new Set();
 var _compareEnabledMetrics = {};  // name -> bool
 var _compareZoomed = false;
 var _compareRunMeta = {};  // runId -> run metadata
+var _compareNormalize = false;
+// External directories loaded for comparison
+var _compareExternalRuns = [];  // [{run_id, dir, label, ...}]
 
 function _getCompareRunColor(runId) {
   if (!_compareRunColorMap[runId]) {
@@ -918,8 +932,10 @@ function _getCompareRunColor(runId) {
         return _compareRunColorPalette[i];
       }
     }
-    // All colors used, cycle
-    _compareRunColorMap[runId] = _compareRunColorPalette[Object.keys(_compareRunColorMap).length % _compareRunColorPalette.length];
+    // Generate a unique color via HSL when palette exhausted
+    var idx = Object.keys(_compareRunColorMap).length;
+    var hue = (idx * 137.508) % 360;  // golden angle for distinct hues
+    _compareRunColorMap[runId] = 'hsl(' + Math.round(hue) + ',70%,55%)';
   }
   return _compareRunColorMap[runId];
 }
@@ -936,26 +952,89 @@ function initCompare() {
         if (_compareChart) _compareChart.resize();
         _updateCompareOverlayInfo();
     });
+
+    // Normalize toggle for compare chart
+    var normBtn = document.getElementById('btnNormalizeCompare');
+    if (normBtn) {
+      normBtn.addEventListener('click', function() {
+        _compareNormalize = !_compareNormalize;
+        normBtn.classList.toggle('btn-accent', _compareNormalize);
+        _rebuildCompareChart();
+      });
+    }
+
+    // External dir loader
+    var loadDirBtn = document.getElementById('btnCompareLoadDir');
+    var loadDirForm = document.getElementById('compareLoadDirForm');
+    if (loadDirBtn && loadDirForm) {
+      loadDirBtn.addEventListener('click', function() {
+        loadDirForm.style.display = loadDirForm.style.display === 'none' ? 'block' : 'none';
+      });
+      var cancelBtn = document.getElementById('btnCompareLoadDirCancel');
+      if (cancelBtn) cancelBtn.addEventListener('click', function() {
+        loadDirForm.style.display = 'none';
+      });
+      var submitBtn = document.getElementById('btnCompareLoadDirSubmit');
+      if (submitBtn) submitBtn.addEventListener('click', _loadExternalDir);
+    }
 }
 
-async function fetchCompareRuns() {
-    var data = await api('GET', '/api/runs/discover');
-    if (!data || !data.runs) return;
+async function _loadExternalDir() {
+    var dirInput = document.getElementById('compareExternalDir');
+    if (!dirInput || !dirInput.value.trim()) return;
+    var dirPath = dirInput.value.trim();
 
-    // Store run metadata
-    data.runs.forEach(function(run) {
-        if (run.run_id) _compareRunMeta[run.run_id] = run;
-    });
-
-    var list = $('#compareRunList');
-    list.innerHTML = '';
-
-    if (data.runs.length === 0) {
-        list.innerHTML = '<div style="color:var(--text-muted);font-size:10px;padding:8px">No runs found. Start training or point at a directory with run subdirs.</div>';
+    var data = await api('POST', '/api/runs/load-external', {dir: dirPath});
+    if (!data || !data.runs || data.runs.length === 0) {
+        alert('No runs found in: ' + dirPath);
         return;
     }
 
-    data.runs.forEach(function(run, idx) {
+    // Store as external runs and add to run list
+    data.runs.forEach(function(run) {
+        run._external = true;
+        run._source_dir = dirPath;
+        _compareExternalRuns.push(run);
+        _compareRunMeta[run.run_id] = run;
+    });
+
+    // Hide form, refresh the run list display
+    document.getElementById('compareLoadDirForm').style.display = 'none';
+    dirInput.value = '';
+    _refreshCompareRunList();
+}
+
+function _refreshCompareRunList() {
+    var list = $('#compareRunList');
+    list.innerHTML = '';
+
+    // Combine discovered + external runs
+    var allRuns = [];
+    // Add external runs
+    _compareExternalRuns.forEach(function(run) { allRuns.push(run); });
+
+    // Also trigger normal discover to add local runs
+    api('GET', '/api/runs/discover').then(function(data) {
+        if (data && data.runs) {
+            data.runs.forEach(function(run) {
+                _compareRunMeta[run.run_id] = run;
+                allRuns.push(run);
+            });
+        }
+        _renderCompareRunList(allRuns);
+    });
+}
+
+function _renderCompareRunList(runs) {
+    var list = $('#compareRunList');
+    list.innerHTML = '';
+
+    if (runs.length === 0) {
+        list.innerHTML = '<div style="color:var(--text-muted);font-size:10px;padding:8px">No runs found.</div>';
+        return;
+    }
+
+    runs.forEach(function(run) {
         var div = document.createElement('div');
         var color = _getCompareRunColor(run.run_id);
         var isSelected = _selectedCompareRuns.has(run.run_id);
@@ -966,10 +1045,11 @@ async function fetchCompareRuns() {
         var dot = '<span style="width:8px;height:8px;border-radius:50%;background:' + color + ';flex-shrink:0;display:inline-block"></span>';
         var configLabel = run.label || run.run_id || '?';
         var stepInfo = run.step_count ? run.step_count + ' steps' : '--';
+        var sourceTag = run._external ? '<span style="color:var(--cyan);font-size:8px;margin-left:4px">EXT</span>' : '';
 
         div.innerHTML = dot +
             '<div style="flex:1;overflow:hidden">' +
-            '<div style="font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + configLabel + '</div>' +
+            '<div style="font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + configLabel + sourceTag + '</div>' +
             '<div style="color:var(--text-muted);font-size:9px">' + run.run_id + ' · ' + stepInfo + '</div>' +
             '</div>';
 
@@ -988,6 +1068,22 @@ async function fetchCompareRuns() {
 
         list.appendChild(div);
     });
+}
+
+async function fetchCompareRuns() {
+    var data = await api('GET', '/api/runs/discover');
+    var allRuns = [];
+    if (data && data.runs) {
+        data.runs.forEach(function(run) {
+            if (run.run_id) _compareRunMeta[run.run_id] = run;
+            allRuns.push(run);
+        });
+    }
+    // Merge external runs
+    _compareExternalRuns.forEach(function(run) {
+        allRuns.push(run);
+    });
+    _renderCompareRunList(allRuns);
 }
 
 function _updateCompareMetricToggles() {
@@ -1120,16 +1216,39 @@ function _rebuildCompareChart() {
     // Color by metric name (consistent across runs), dash pattern by run/experiment
     var runDashPatterns = [[], [6, 3], [3, 3], [8, 3, 2, 3], [4, 2], [10, 3]];
 
+    // Pre-compute per-metric min/max for normalization (across all runs)
+    var _cmpMetricRange = {};
+    if (_compareNormalize) {
+      enabledMetrics.forEach(function(metricName) {
+        var mn = Infinity, mx = -Infinity;
+        runIds.forEach(function(runId) {
+          var records = _compareAllData[runId] || [];
+          records.forEach(function(rec) {
+            var v = (rec.metrics || {})[metricName];
+            if (typeof v === 'number') {
+              if (v < mn) mn = v;
+              if (v > mx) mx = v;
+            }
+          });
+        });
+        if (mx === mn) { mn -= 0.5; mx += 0.5; }
+        _cmpMetricRange[metricName] = {min: mn, max: mx};
+      });
+    }
+
     runIds.forEach(function(runId, runIdx) {
         var records = _compareAllData[runId] || [];
         var dashPattern = runDashPatterns[runIdx % runDashPatterns.length];
 
         enabledMetrics.forEach(function(metricName, metricIdx) {
             var points = [];
+            var range = _cmpMetricRange[metricName];
             records.forEach(function(rec) {
                 var metrics = rec.metrics || {};
                 if (metricName in metrics) {
-                    points.push({x: rec.step, y: metrics[metricName]});
+                    var v = metrics[metricName];
+                    var y = (_compareNormalize && range) ? (v - range.min) / (range.max - range.min) : v;
+                    points.push({x: rec.step, y: y, _rawY: v});
                 }
             });
             if (points.length === 0) return;
@@ -1166,7 +1285,7 @@ function _rebuildCompareChart() {
             animation: false,
             scales: {
                 x: {type: 'linear', title: {display: true, text: 'Step', color: '#7a8fa3', font:{size:11}}, ticks: {color:'#7a8fa3'}, grid: {color: 'rgba(30,46,68,0.5)'}},
-                y: {title: {display: false}, ticks: {color:'#7a8fa3'}, grid: {color: 'rgba(30,46,68,0.3)'}},
+                y: {title: {display: _compareNormalize, text: 'Normalized [0,1]', color: '#7a8fa3', font:{size:10}}, ticks: {color:'#7a8fa3'}, grid: {color: 'rgba(30,46,68,0.3)'}},
             },
             plugins: {
                 legend: {
@@ -1187,6 +1306,14 @@ function _rebuildCompareChart() {
                     backgroundColor:'#121c2b', borderColor:'#2a4060', borderWidth:1,
                     titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:10},
                     usePointStyle: true, boxWidth: 8, boxHeight: 8,
+                    intersect: false, mode: 'nearest', axis: 'x',
+                    itemSort: function(a, b) {
+                      var chart = a.chart;
+                      var cursorY = (chart && chart._lastEvent) ? chart._lastEvent.y : 0;
+                      var ay = a.element ? a.element.y : 0;
+                      var by = b.element ? b.element.y : 0;
+                      return Math.abs(ay - cursorY) - Math.abs(by - cursorY);
+                    },
                     callbacks: {
                         label: function(ctx) {
                             var raw = ctx.raw;
@@ -1208,9 +1335,12 @@ function _rebuildCompareChart() {
                                 if (raw._metric) parts.push('on: ' + raw._metric);
                                 return parts;
                             }
-                            // Regular line tooltip — show run color swatch info
+                            // Regular line tooltip — show raw value when normalized
                             var ds = ctx.dataset;
                             var val = typeof ctx.parsed.y === 'number' ? ctx.parsed.y.toPrecision(5) : ctx.parsed.y;
+                            if (_compareNormalize && raw && raw._rawY !== undefined) {
+                                return ds.label + ': ' + (typeof fmtNum === 'function' ? fmtNum(raw._rawY) : raw._rawY.toPrecision(5)) + ' (norm: ' + parseFloat(val).toFixed(3) + ')';
+                            }
                             return ds.label + ': ' + val;
                         }
                     }
@@ -1360,19 +1490,27 @@ async function updateCompareChart() {
 
     for (var i = 0; i < runIds.length; i++) {
         (function(runId) {
-            // Fetch metrics
-            var p1 = api('GET', '/api/train/runs/' + runId + '/metrics').then(function(data) {
+            var meta = _compareRunMeta[runId] || {};
+            var isExternal = !!meta._external;
+            var runDir = meta.dir || '';
+
+            // Fetch metrics — use external API for external runs
+            var metricsUrl = isExternal
+                ? '/api/runs/external/metrics?dir=' + encodeURIComponent(runDir) + '&last_n=50000'
+                : '/api/train/runs/' + runId + '/metrics';
+            var p1 = api('GET', metricsUrl).then(function(data) {
                 if (data && data.records) {
                     _compareAllData[runId] = data.records;
-                    // Discover metric names
+                    // Discover metric names — default only losses/key metric ON
                     data.records.forEach(function(rec) {
                         var metrics = rec.metrics || {};
                         Object.keys(metrics).forEach(function(name) {
                             if (typeof metrics[name] === 'number') {
                                 _compareMetricNames.add(name);
                                 if (!(name in _compareEnabledMetrics)) {
-                                    // Default: enable all discovered metrics
-                                    _compareEnabledMetrics[name] = true;
+                                    var lower = name.toLowerCase();
+                                    var isLoss = lower.indexOf('loss') !== -1;
+                                    _compareEnabledMetrics[name] = isLoss;
                                 }
                             }
                         });
@@ -1380,7 +1518,10 @@ async function updateCompareChart() {
                 }
             });
             // Fetch applied data for mutation markers
-            var p2 = api('GET', '/api/train/runs/' + runId + '/applied').then(function(data) {
+            var appliedUrl = isExternal
+                ? '/api/runs/external/applied?dir=' + encodeURIComponent(runDir) + '&last_n=200'
+                : '/api/train/runs/' + runId + '/applied';
+            var p2 = api('GET', appliedUrl).then(function(data) {
                 if (data && data.records) {
                     _compareAllData['_applied_' + runId] = data.records;
                 }

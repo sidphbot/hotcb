@@ -22,8 +22,8 @@ from typing import Optional
 class _OptProxy:
     """Minimal optimizer-like object for synthetic demos.
 
-    Provides ``param_groups`` so HotOptController can mutate lr/wd
-    exactly as it would with a real ``torch.optim.Optimizer``.
+    Provides ``param_groups`` so optimizer actuators can mutate lr/wd
+    exactly as they would with a real ``torch.optim.Optimizer``.
     """
 
     def __init__(self, **kwargs):
@@ -45,15 +45,15 @@ def _demo_training(
     """
     from hotcb.kernel import HotKernel
     from hotcb.metrics import MetricsCollector
-    from hotcb.actuators import OptimizerActuator
-
-    # --- Wire up kernel + metrics ---
-    mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
-    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
-    kernel.register_actuator("opt", OptimizerActuator())
+    from hotcb.actuators import optimizer_actuators, mutable_state
 
     # --- Optimizer proxy (kernel mutates param_groups in-place) ---
     opt = _OptProxy(lr=1e-3, weight_decay=1e-4)
+
+    # --- Wire up kernel + metrics ---
+    mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
+    ms = mutable_state(optimizer_actuators(opt))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc, mutable_state=ms)
 
     # --- Simulated training state ---
     loss = 2.5 + random.uniform(-0.1, 0.1)

@@ -52,7 +52,7 @@ def _golden_training(
     """
     from hotcb.kernel import HotKernel
     from hotcb.metrics import MetricsCollector
-    from hotcb.actuators import OptimizerActuator, MutableStateActuator
+    from hotcb.actuators import optimizer_actuators, loss_actuators, mutable_state
 
     # --- File paths ---
     commands_path = os.path.join(run_dir, "hotcb.commands.jsonl")
@@ -89,17 +89,12 @@ def _golden_training(
     opt = _OptProxy(lr=1e-3, weight_decay=1e-4)
 
     # --- Mutable state for multi-task loss weights ---
-    mutable_state = {
-        "weights": {"weight_a": 0.7, "weight_b": 0.3},
-        "terms": {},
-        "ramps": {},
-    }
+    loss_weights = {"weight_a": 0.7, "weight_b": 0.3}
 
     # --- Wire HotKernel + MetricsCollector + actuators ---
     mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
-    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
-    kernel.register_actuator("opt", OptimizerActuator())
-    kernel.register_actuator("loss", MutableStateActuator())
+    ms = mutable_state(optimizer_actuators(opt) + loss_actuators(loss_weights))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc, mutable_state=ms)
 
     # --- Training state ---
     loss_a = 2.3 + random.uniform(-0.05, 0.05)   # CE loss
@@ -125,8 +120,8 @@ def _golden_training(
         # --- Read current state from kernel-managed objects ---
         lr = opt.param_groups[0]["lr"]
         wd = opt.param_groups[0]["weight_decay"]
-        weight_a = mutable_state["weights"]["weight_a"]
-        weight_b = mutable_state["weights"]["weight_b"]
+        weight_a = loss_weights["weight_a"]
+        weight_b = loss_weights["weight_b"]
 
         # --- Simulate training dynamics ---
         # Warmup phase (steps 1-50)
@@ -169,7 +164,6 @@ def _golden_training(
             "step": step,
             "epoch": step // 50,
             "optimizer": opt,
-            "mutable_state": mutable_state,
             "metrics": {
                 "train_loss": round(total_loss, 6),
                 "val_loss": round(weight_a * val_loss_a + weight_b * val_loss_b, 6),

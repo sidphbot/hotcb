@@ -28,6 +28,14 @@
       <span id="stepValue">--</span>
     </div>
   </div>
+  <!-- Compact status bar for compare mode -->
+  <div class="compare-status-bar" id="compareStatusBar">
+    <span id="cmpTrainStatus" style="color:var(--accent)">Training: --</span>
+    <span style="color:var(--border)">|</span>
+    <span id="cmpAutopilotStatus" style="color:var(--cyan)">Autopilot: off</span>
+    <span style="color:var(--border)">|</span>
+    <span id="cmpStepStatus">Step: --</span>
+  </div>
   <div class="header-right">
     <select class="header-select" id="themeSelect" title="Theme">
       <option value="midnight">Midnight</option>
@@ -66,6 +74,7 @@
     <div class="tab-content active" data-tab="metrics">
       <div class="chart-toolbar">
         <div class="metric-toggles" id="metricToggles"></div>
+        <button class="btn btn-sm" id="btnNormalize" title="Toggle Y-axis normalization (scales all metrics to 0-1)">Norm</button>
         <div class="step-range-controls" id="stepRangeControls">
           <button class="btn btn-sm range-btn active" data-range="all">All</button>
           <button class="btn btn-sm range-btn" data-range="last200">Last 200</button>
@@ -275,8 +284,10 @@
         <div style="display:flex;align-items:center;gap:8px;">
           <span style="font-size:10px;color:var(--text-muted)">Experiment Comparison</span>
           <div id="compareMetricToggles" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+          <button class="btn btn-sm" id="btnNormalizeCompare" title="Toggle Y-axis normalization">Norm</button>
         </div>
         <div class="btn-group">
+          <button class="btn btn-sm" id="btnCompareLoadDir" title="Load runs from external directory">+ Dir</button>
           <button class="btn btn-sm" id="btnCompareZoom" title="Expand chart fullscreen">&#x26F6; Zoom</button>
           <button class="btn btn-sm btn-accent" id="btnCompareRefresh">Refresh Runs</button>
         </div>
@@ -285,6 +296,14 @@
         <!-- Run list sidebar -->
         <div style="width:220px;border-right:1px solid var(--border);overflow-y:auto;padding:8px;flex-shrink:0;" id="compareSidebar">
           <div style="font-size:9px;font-weight:700;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;letter-spacing:0.5px">Select Runs to Compare</div>
+          <!-- External dir loader -->
+          <div id="compareLoadDirForm" style="display:none;margin-bottom:8px;padding:6px;border:1px solid var(--border);border-radius:4px;">
+            <input type="text" id="compareExternalDir" placeholder="/path/to/runs" style="width:100%;font-size:10px;padding:3px 6px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:3px;font-family:var(--font-mono);margin-bottom:4px;">
+            <div style="display:flex;gap:4px;">
+              <button class="btn btn-sm btn-accent" id="btnCompareLoadDirSubmit" style="font-size:9px;flex:1">Load</button>
+              <button class="btn btn-sm" id="btnCompareLoadDirCancel" style="font-size:9px">Cancel</button>
+            </div>
+          </div>
           <div id="compareRunList" style="display:flex;flex-direction:column;gap:4px;"></div>
         </div>
         <!-- Comparison chart -->
@@ -357,55 +376,7 @@
       </div>
     </div>
     <div class="card-body" id="knobPanel">
-      <div class="knob-row multi-opt-only" data-param="opt_idx" style="display:none">
-        <span class="knob-label">opt</span>
-        <select id="knobOptIdx" style="flex:1;font-size:10px;padding:2px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);border-radius:3px">
-          <option value="0">optimizer 0</option>
-        </select>
-      </div>
-      <div class="knob-explain multi-opt-only" style="display:none">Select which optimizer to control. LR/WD changes apply to the selected optimizer.</div>
-      <div class="knob-row" data-param="lr">
-        <span class="knob-label">lr</span>
-        <input type="range" min="-6" max="0" step="0.01" value="-3.5" id="knobLr">
-        <input type="text" class="knob-input" id="knobLrVal" value="3.16e-4">
-      </div>
-      <div class="knob-explain">Learning Rate controls how big each step is. Too high = unstable training. Too low = slow progress.</div>
-
-      <div class="knob-row" data-param="wd">
-        <span class="knob-label">wd</span>
-        <input type="range" min="-6" max="-1" step="0.01" value="-4" id="knobWd">
-        <input type="text" class="knob-input" id="knobWdVal" value="1.00e-4">
-      </div>
-      <div class="knob-explain">Weight Decay prevents memorization. Higher = more regularization, less overfitting risk.</div>
-
-      <div class="knob-row single-loss-only" data-param="loss_w">
-        <span class="knob-label">loss_w</span>
-        <input type="range" min="0" max="1" step="0.01" value="1" id="knobLossW">
-        <input type="text" class="knob-input" id="knobLossWVal" value="1.00">
-      </div>
-      <div class="knob-explain single-loss-only">Loss Weight controls how much this component matters relative to others.</div>
-
-      <div class="knob-row multitask-only" data-param="weight_a" style="display:none">
-        <span class="knob-label">&lambda;_A</span>
-        <input type="range" min="0" max="1" step="0.01" value="0.7" id="knobWeightA">
-        <input type="text" class="knob-input" id="knobWeightAVal" value="0.70">
-      </div>
-      <div class="knob-explain multitask-only" style="display:none">Task A (classification) weight. Increase to focus on classification accuracy.</div>
-      <div class="knob-row multitask-only" data-param="weight_b" style="display:none">
-        <span class="knob-label">&lambda;_B</span>
-        <input type="range" min="0" max="1" step="0.01" value="0.3" id="knobWeightB">
-        <input type="text" class="knob-input" id="knobWeightBVal" value="0.30">
-      </div>
-      <div class="knob-explain multitask-only" style="display:none">Task B (reconstruction) weight. Increase to focus on reconstruction quality.</div>
-
-      <div class="knob-row finetune-only" data-param="backbone_frozen" style="display:none">
-        <span class="knob-label">Backbone</span>
-        <select id="knobBackbone" style="flex:1;font-size:11px;padding:2px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:3px">
-          <option value="1">Frozen</option>
-          <option value="0">Unfrozen</option>
-        </select>
-      </div>
-      <div class="knob-explain finetune-only" style="display:none">Toggle backbone freeze/unfreeze. Unfreezing enables full model finetuning.</div>
+      <!-- Controls generated dynamically from /api/config -->
     </div>
   </div>
 
@@ -519,7 +490,7 @@
       Alerts
       <button class="btn btn-sm" id="btnAddAlert">+ Rule</button>
     </div>
-    <div class="card-body" id="alertList" style="max-height:200px;overflow-y:auto">
+    <div class="card-body" id="alertList">
       <div style="font-size:10px;color:var(--text-muted)">No alerts</div>
     </div>
   </div>

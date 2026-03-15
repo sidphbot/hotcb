@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from hotcb.kernel import HotKernel
 from hotcb.adapters.lightning import HotCBLightning
+from hotcb.actuators import loss_actuators, mutable_state as make_mutable_state
 
 
 class TinyModel(pl.LightningModule):
@@ -165,11 +166,12 @@ class TestMutableStateMutation:
         run_dir = str(tmp_path / "run_loss")
         os.makedirs(run_dir, exist_ok=True)
 
-        _write_commands(run_dir, {"module": "loss", "op": "set_params", "id": "main", "params": {"distill_w": 0.5}})
+        _write_commands(run_dir, {"module": "loss", "op": "set_params", "id": "main", "params": {"key": "distill", "value": 0.5}})
 
-        mutable_state = {"weights": {}, "terms": {}, "ramps": {}}
-        kernel = HotKernel(run_dir=run_dir, debounce_steps=1)
-        adapter = HotCBLightning(kernel=kernel, mutable_state=mutable_state)
+        loss_weights = {"distill": 1.0}
+        ms = make_mutable_state(loss_actuators(loss_weights))
+        kernel = HotKernel(run_dir=run_dir, debounce_steps=1, mutable_state=ms)
+        adapter = HotCBLightning(kernel=kernel)
         model = TinyModel()
 
         trainer = pl.Trainer(
@@ -179,7 +181,7 @@ class TestMutableStateMutation:
         )
         trainer.fit(model)
 
-        assert mutable_state["weights"]["distill"] == 0.5
+        assert loss_weights["distill"] == pytest.approx(0.5)
 
         ledger = _read_ledger(run_dir)
         loss_applied = [e for e in ledger if e.get("module") == "loss" and e.get("decision") == "applied"]

@@ -3,7 +3,7 @@
  */
 
 var _wsRetryCount = 0;
-var _wsMaxRetries = 20;
+var _wsMaxRetries = (S.config && S.config.server) ? S.config.server.ws_max_retries : 20;
 var _slidersInitialized = false;
 var _lastSeenMaxStep = 0;  // track for run-reset detection
 
@@ -23,7 +23,9 @@ function connectWS() {
     $('#wsStatus').className = 'status-dot error';
     $('#wsLabel').textContent = 'disconnected';
     if (_wsRetryCount < _wsMaxRetries) {
-      var delay = Math.min(3000 * Math.pow(1.5, _wsRetryCount), 30000);
+      var _wsRetryBaseMs = ((S.config && S.config.server) ? S.config.server.ws_retry_base : 3) * 1000;
+      var _wsRetryCapMs = ((S.config && S.config.server) ? S.config.server.ws_retry_cap : 30) * 1000;
+      var delay = Math.min(_wsRetryBaseMs * Math.pow(1.5, _wsRetryCount), _wsRetryCapMs);
       _wsRetryCount++;
       setTimeout(connectWS, delay);
     }
@@ -104,6 +106,9 @@ function connectWS() {
         _lastSeenMaxStep = maxStep;
         var stepEl = document.getElementById('stepValue');
         if (stepEl) stepEl.textContent = maxStep;
+        // Update compare status bar step counter
+        var cmpStepEl = document.getElementById('cmpStepStatus');
+        if (cmpStepEl) cmpStepEl.textContent = 'Step: ' + maxStep;
         // Trigger forecast refresh on new data
         if (typeof onNewMetricsForForecast === 'function') onNewMetricsForForecast(maxStep);
       }

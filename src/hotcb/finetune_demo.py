@@ -24,7 +24,7 @@ from typing import Optional
 
 from hotcb.kernel import HotKernel
 from hotcb.metrics import MetricsCollector
-from hotcb.actuators import OptimizerActuator, MutableStateActuator
+from hotcb.actuators import optimizer_actuators, loss_actuators, mutable_state as make_mutable_state
 
 
 class _OptProxy:
@@ -65,18 +65,13 @@ def _finetune_training(
     # --- Optimizer proxy (kernel mutates param_groups via opt module) ---
     opt = _OptProxy(lr=5e-4, weight_decay=5e-4)
 
-    # --- Mutable state for loss weight (kernel mutates via loss module) ---
-    mutable_state: dict = {
-        "weights": {"main": 1.0},
-        "terms": {},
-        "ramps": {},
-    }
+    # --- Loss weights dict (kernel mutates via MutableState) ---
+    loss_weights: dict = {"main": 1.0}
 
     # --- Wire HotKernel + MetricsCollector + actuators ---
     mc = MetricsCollector(os.path.join(run_dir, "hotcb.metrics.jsonl"))
-    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc)
-    kernel.register_actuator("opt", OptimizerActuator())
-    kernel.register_actuator("loss", MutableStateActuator())
+    ms = make_mutable_state(optimizer_actuators(opt) + loss_actuators(loss_weights))
+    kernel = HotKernel(run_dir=run_dir, debounce_steps=1, metrics_collector=mc, mutable_state=ms)
 
     # --- Recipe: scheduled commands written to commands.jsonl at trigger steps ---
     recipe_schedule: dict = {
@@ -130,7 +125,7 @@ def _finetune_training(
         # --- Read current optimizer state (kernel may have mutated it) ---
         lr = opt.param_groups[0]["lr"]
         wd = opt.param_groups[0].get("weight_decay", 5e-4)
-        loss_weight = mutable_state["weights"].get("main", 1.0)
+        loss_weight = loss_weights.get("main", 1.0)
 
         # --- Simulate training dynamics ---
 
@@ -232,7 +227,6 @@ def _finetune_training(
             "step": step,
             "epoch": step // 50,
             "optimizer": opt,
-            "mutable_state": mutable_state,
             "metrics": {
                 "train_loss": round(scaled_train_loss, 6),
                 "val_loss": round(scaled_val_loss, 6),
@@ -278,7 +272,6 @@ def _finetune_training(
         "step": max_steps,
         "epoch": max_steps // 50,
         "optimizer": opt,
-        "mutable_state": mutable_state,
     }
     kernel.close(final_env)
 

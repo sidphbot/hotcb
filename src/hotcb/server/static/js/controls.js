@@ -1,5 +1,8 @@
 /**
  * hotcb dashboard — knobs, freeze, autopilot
+ *
+ * Controls are generated dynamically from /api/config controls field
+ * (populated by MutableState.describe_all() on the server).
  */
 
 function lrFromSlider(v) { return Math.pow(10, parseFloat(v)); }
@@ -13,38 +16,230 @@ var _healthEma = null;  // EMA-smoothed health score
 // Track last-applied slider values for staged-change highlighting
 var _appliedKnobs = {};
 
+/* ================================================================ */
+/* Dynamic control generation from actuator metadata                 */
+/* ================================================================ */
+
+function buildControls(controlSpecs) {
+  var panel = document.getElementById('knobPanel');
+  if (!panel) return;
+  if (!controlSpecs || !controlSpecs.length) {
+    panel.innerHTML = '<div style="font-size:10px;color:var(--text-muted)">No controls available</div>';
+    return;
+  }
+  panel.innerHTML = '';
+
+  // Group by group field
+  var groups = {};
+  var groupOrder = [];
+  controlSpecs.forEach(function(spec) {
+    var g = spec.group || 'other';
+    if (!groups[g]) {
+      groups[g] = [];
+      groupOrder.push(g);
+    }
+    groups[g].push(spec);
+  });
+
+  // Render each group
+  groupOrder.forEach(function(groupName) {
+    var header = document.createElement('div');
+    header.className = 'knob-group-header';
+    header.textContent = groupName.charAt(0).toUpperCase() + groupName.slice(1);
+    panel.appendChild(header);
+
+    groups[groupName].forEach(function(spec) {
+      panel.appendChild(buildKnobRow(spec));
+    });
+  });
+
+  // Wire up input event listeners for staged-change highlighting
+  _wireKnobInputListeners();
+}
+
+function buildKnobRow(spec) {
+  // spec = {param_key, type, label, group, min, max, step, log_base, choices, current, state}
+  var row = document.createElement('div');
+  row.className = 'knob-row';
+  row.dataset.param = spec.param_key;
+
+  var label = document.createElement('span');
+  label.className = 'knob-label';
+  label.textContent = spec.label || spec.param_key;
+  row.appendChild(label);
+
+  if (spec.type === 'bool') {
+    // Toggle switch
+    var toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.className = 'knob-toggle';
+    toggle.checked = !!spec.current;
+    toggle.dataset.param = spec.param_key;
+    row.appendChild(toggle);
+  } else if (spec.type === 'choice') {
+    // Dropdown
+    var select = document.createElement('select');
+    select.className = 'knob-select';
+    select.dataset.param = spec.param_key;
+    (spec.choices || []).forEach(function(c) {
+      var opt = document.createElement('option');
+      opt.value = c;
+      opt.textContent = c;
+      if (c === spec.current) opt.selected = true;
+      select.appendChild(opt);
+    });
+    row.appendChild(select);
+  } else if (spec.type === 'log_float') {
+    // Log-scale slider
+    var logMin = Math.log10(spec.min || 1e-7);
+    var logMax = Math.log10(spec.max || 1.0);
+    var logCurrent = (spec.current && spec.current > 0) ? Math.log10(spec.current) : logMin;
+
+    var slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'knob-slider';
+    slider.min = logMin;
+    slider.max = logMax;
+    slider.step = spec.step || 0.01;
+    slider.value = logCurrent;
+    slider.dataset.param = spec.param_key;
+    slider.dataset.logScale = 'true';
+    row.appendChild(slider);
+
+    var valInput = document.createElement('input');
+    valInput.type = 'text';
+    valInput.className = 'knob-val';
+    valInput.value = spec.current != null ? Number(spec.current).toExponential(2) : '';
+    valInput.dataset.param = spec.param_key;
+    row.appendChild(valInput);
+  } else {
+    // Linear slider (float, int)
+    var slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'knob-slider';
+    slider.min = spec.min != null ? spec.min : 0;
+    slider.max = spec.max != null ? spec.max : 1;
+    slider.step = spec.step || 0.01;
+    slider.value = spec.current != null ? spec.current : 0;
+    slider.dataset.param = spec.param_key;
+    row.appendChild(slider);
+
+    var valInput = document.createElement('input');
+    valInput.type = 'text';
+    valInput.className = 'knob-val';
+    valInput.value = spec.current != null ? spec.current : '';
+    valInput.dataset.param = spec.param_key;
+    row.appendChild(valInput);
+  }
+
+  // State indicator
+  if (spec.state && spec.state !== 'untouched' && spec.state !== 'verified') {
+    var stateEl = document.createElement('span');
+    stateEl.className = 'knob-state knob-state-' + spec.state;
+    stateEl.textContent = spec.state;
+    row.appendChild(stateEl);
+  }
+
+  return row;
+}
+
+function _wireKnobInputListeners() {
+  var panel = document.getElementById('knobPanel');
+  if (!panel) return;
+
+  // Sliders: sync display value on input
+  panel.querySelectorAll('.knob-slider').forEach(function(slider) {
+    slider.addEventListener('input', function(e) {
+      var param = e.target.dataset.param;
+      var valEl = panel.querySelector('.knob-val[data-param="' + param + '"]');
+      if (!valEl) return;
+      if (e.target.dataset.logScale === 'true') {
+        valEl.value = Math.pow(10, parseFloat(e.target.value)).toExponential(2);
+      } else {
+        valEl.value = parseFloat(e.target.value).toFixed(2);
+      }
+      _markStagedChanges();
+    });
+  });
+
+  // Toggles and selects: mark staged changes on change
+  panel.querySelectorAll('.knob-toggle, .knob-select').forEach(function(el) {
+    el.addEventListener('change', function() { _markStagedChanges(); });
+  });
+}
+
+/**
+ * Read current value from a dynamic control row.
+ */
+function _readKnobValue(row) {
+  var slider = row.querySelector('.knob-slider');
+  var toggle = row.querySelector('.knob-toggle');
+  var select = row.querySelector('.knob-select');
+
+  if (toggle) return toggle.checked;
+  if (select) return select.value;
+  if (slider) {
+    if (slider.dataset.logScale === 'true') {
+      return Math.pow(10, parseFloat(slider.value));
+    }
+    return parseFloat(slider.value);
+  }
+  return undefined;
+}
+
+/**
+ * Build the module -> param_key mapping for apply commands.
+ * Groups determine which API endpoint to use:
+ *   "optimizer" -> POST /api/opt/set
+ *   "loss" -> POST /api/loss/set
+ *   Other groups -> POST /api/opt/set (generic param set)
+ */
+function _getControlSpec(paramKey) {
+  var specs = (S.config && S.config.controls) || [];
+  for (var i = 0; i < specs.length; i++) {
+    if (specs[i].param_key === paramKey) return specs[i];
+  }
+  return null;
+}
+
 function _markStagedChanges() {
-  var knobs = {
-    lr: {slider: 'knobLr', transform: function(v) { return Math.pow(10, parseFloat(v)); }},
-    wd: {slider: 'knobWd', transform: function(v) { return Math.pow(10, parseFloat(v)); }},
-    loss_w: {slider: 'knobLossW', transform: function(v) { return parseFloat(v); }},
-    weight_a: {slider: 'knobWeightA', transform: function(v) { return parseFloat(v); }},
-    weight_b: {slider: 'knobWeightB', transform: function(v) { return parseFloat(v); }},
-  };
-  Object.keys(knobs).forEach(function(key) {
-    var cfg = knobs[key];
-    var el = document.getElementById(cfg.slider);
-    if (!el) return;
-    var row = el.closest('.knob-row');
-    if (!row) return;
-    var current = cfg.transform(el.value);
-    var applied = _appliedKnobs[key];
-    if (applied !== undefined && Math.abs(current - applied) / Math.max(Math.abs(applied), 1e-12) > 0.005) {
-      row.classList.add('staged');
-    } else {
+  var panel = document.getElementById('knobPanel');
+  if (!panel) return;
+  var threshold = (S.config && S.config.ui && S.config.ui.staged_change_threshold) || 0.005;
+  panel.querySelectorAll('.knob-row[data-param]').forEach(function(row) {
+    var param = row.dataset.param;
+    var current = _readKnobValue(row);
+    var applied = _appliedKnobs[param];
+
+    if (applied === undefined || current === undefined) {
       row.classList.remove('staged');
+      return;
+    }
+    if (typeof current === 'boolean') {
+      if (current !== applied) row.classList.add('staged');
+      else row.classList.remove('staged');
+    } else if (typeof current === 'string') {
+      if (current !== applied) row.classList.add('staged');
+      else row.classList.remove('staged');
+    } else {
+      var denom = Math.max(Math.abs(applied), 1e-12);
+      if (Math.abs(current - applied) / denom > threshold) {
+        row.classList.add('staged');
+      } else {
+        row.classList.remove('staged');
+      }
     }
   });
 }
 
 function _snapshotAppliedKnobs() {
-  _appliedKnobs.lr = lrFromSlider($('#knobLr').value);
-  _appliedKnobs.wd = Math.pow(10, parseFloat($('#knobWd').value));
-  _appliedKnobs.loss_w = parseFloat($('#knobLossW').value);
-  _appliedKnobs.weight_a = parseFloat($('#knobWeightA').value);
-  _appliedKnobs.weight_b = parseFloat($('#knobWeightB').value);
-  var bbEl = $('#knobBackbone');
-  if (bbEl) _appliedKnobs.backbone_frozen = bbEl.value === '1';
+  var panel = document.getElementById('knobPanel');
+  if (!panel) return;
+  panel.querySelectorAll('.knob-row[data-param]').forEach(function(row) {
+    var param = row.dataset.param;
+    var val = _readKnobValue(row);
+    if (val !== undefined) _appliedKnobs[param] = val;
+  });
   // Clear all staged highlights
   document.querySelectorAll('.knob-row.staged').forEach(function(el) { el.classList.remove('staged'); });
 }
@@ -108,100 +303,69 @@ function _clearTrainingState() {
 }
 
 function _updateConfigControls(configId) {
-  var multitaskEls = document.querySelectorAll('.multitask-only');
-  var finetuneEls = document.querySelectorAll('.finetune-only');
-  var singleLossEls = document.querySelectorAll('.single-loss-only');
-
-  var isMultitask = configId === 'multitask';
-  var isFinetune = configId === 'finetune';
-
-  multitaskEls.forEach(function(el) { el.style.display = isMultitask ? '' : 'none'; });
-  finetuneEls.forEach(function(el) { el.style.display = isFinetune ? '' : 'none'; });
-  singleLossEls.forEach(function(el) { el.style.display = isMultitask ? 'none' : ''; });
+  // No-op: controls are now generated dynamically from actuator metadata.
+  // Kept as a stub because initControls and launcher still reference it.
 }
 
 function initControls() {
-  // Knob sliders
-  $('#knobLr').addEventListener('input', function(e) {
-    var v = lrFromSlider(e.target.value);
-    $('#knobLrVal').value = v.toExponential(2);
-    _markStagedChanges();
-  });
-  $('#knobWd').addEventListener('input', function(e) {
-    var v = Math.pow(10, parseFloat(e.target.value));
-    $('#knobWdVal').value = v.toExponential(2);
-    _markStagedChanges();
-  });
-  $('#knobLossW').addEventListener('input', function(e) {
-    $('#knobLossWVal').value = parseFloat(e.target.value).toFixed(2);
-    _markStagedChanges();
-  });
-  $('#knobWeightA').addEventListener('input', function(e) {
-    $('#knobWeightAVal').value = parseFloat(e.target.value).toFixed(2);
-    _markStagedChanges();
-  });
-  $('#knobWeightB').addEventListener('input', function(e) {
-    $('#knobWeightBVal').value = parseFloat(e.target.value).toFixed(2);
-    _markStagedChanges();
-  });
+  // Dynamic controls — build from config if available
+  if (S.config && S.config.controls && S.config.controls.length) {
+    buildControls(S.config.controls);
+  }
 
-  // Apply — diff-only: only send params that actually changed
+  // Apply — dynamic: collect all changed params from knobPanel
   $('#btnApply').addEventListener('click', function() {
     var btn = $('#btnApply');
     btn.textContent = 'Queued...';
     btn.disabled = true;
     debounceApply(async function() {
       var anyChanged = false;
-      // Threshold: relative difference > 0.5% avoids floating-point noise
+      var threshold = (S.config && S.config.ui && S.config.ui.staged_change_threshold) || 0.005;
+
       function _isDiff(current, baseline) {
         if (baseline === undefined) return true;
+        if (typeof current === 'boolean') return current !== baseline;
+        if (typeof current === 'string') return current !== baseline;
         var denom = Math.max(Math.abs(baseline), 1e-12);
-        return Math.abs(current - baseline) / denom > 0.005;
+        return Math.abs(current - baseline) / denom > threshold;
       }
 
-      // OPT params — only include changed values
-      var lr = lrFromSlider($('#knobLr').value);
-      var wd = Math.pow(10, parseFloat($('#knobWd').value));
-      var changedOpt = {};
-      if (_isDiff(lr, _appliedKnobs.lr)) changedOpt.lr = lr;
-      if (_isDiff(wd, _appliedKnobs.wd)) changedOpt.weight_decay = wd;
-      if (Object.keys(changedOpt).length > 0) {
-        var optIdxSel = document.getElementById('knobOptIdx');
-        if (optIdxSel && optIdxSel.parentElement.style.display !== 'none') {
-          var idx = parseInt(optIdxSel.value);
-          if (idx > 0) changedOpt.opt_idx = idx;
+      // Collect changed params grouped by module
+      var changedByGroup = {};  // group -> {param_key: value}
+      var panel = document.getElementById('knobPanel');
+      if (panel) {
+        panel.querySelectorAll('.knob-row[data-param]').forEach(function(row) {
+          var param = row.dataset.param;
+          var current = _readKnobValue(row);
+          if (current === undefined) return;
+          if (!_isDiff(current, _appliedKnobs[param])) return;
+
+          var spec = _getControlSpec(param);
+          var group = (spec && spec.group) || 'optimizer';
+          if (!changedByGroup[group]) changedByGroup[group] = {};
+          changedByGroup[group][param] = current;
+        });
+      }
+
+      // Send commands per group
+      var groups = Object.keys(changedByGroup);
+      for (var gi = 0; gi < groups.length; gi++) {
+        var group = groups[gi];
+        var params = changedByGroup[group];
+        if (group === 'optimizer') {
+          await api('POST', '/api/opt/set', {params: params});
+        } else if (group === 'loss') {
+          await api('POST', '/api/loss/set', {params: params});
+        } else {
+          // Generic: send each param individually as opt set
+          var pkeys = Object.keys(params);
+          for (var pi = 0; pi < pkeys.length; pi++) {
+            var p = {};
+            p[pkeys[pi]] = params[pkeys[pi]];
+            await api('POST', '/api/opt/set', {params: p});
+          }
         }
-        await api('POST', '/api/opt/set', {params: changedOpt});
         anyChanged = true;
-      }
-
-      // LOSS params — only include changed values
-      var configId = $('#trainConfig').value;
-      if (configId === 'multitask') {
-        var wa = parseFloat($('#knobWeightA').value);
-        var wb = parseFloat($('#knobWeightB').value);
-        var changedLoss = {};
-        if (_isDiff(wa, _appliedKnobs.weight_a)) changedLoss.weight_a = wa;
-        if (_isDiff(wb, _appliedKnobs.weight_b)) changedLoss.weight_b = wb;
-        if (Object.keys(changedLoss).length > 0) {
-          await api('POST', '/api/loss/set', {params: changedLoss});
-          anyChanged = true;
-        }
-      } else {
-        var lw = parseFloat($('#knobLossW').value);
-        if (_isDiff(lw, _appliedKnobs.loss_w)) {
-          await api('POST', '/api/loss/set', {params: {weight: lw}});
-          anyChanged = true;
-        }
-      }
-
-      // CB params — only send if backbone toggle changed
-      if (configId === 'finetune') {
-        var frozen = $('#knobBackbone').value === '1';
-        if (_appliedKnobs.backbone_frozen === undefined || frozen !== _appliedKnobs.backbone_frozen) {
-          await api('POST', '/api/cb/set_params', {params: {backbone_frozen: frozen}});
-          anyChanged = true;
-        }
       }
 
       if (!anyChanged) {
@@ -447,88 +611,63 @@ async function loadCapabilities() {
     var caps = await api('GET', '/api/capabilities');
     if (!caps || !caps.detected) return;
     S.capabilities = caps;
-
-    // Multi-optimizer: show optimizer selector
-    var numOpts = caps.num_optimizers || 1;
-    if (numOpts > 1) {
-      var multiOptEls = document.querySelectorAll('.multi-opt-only');
-      multiOptEls.forEach(function(el) { el.style.display = ''; });
-      var sel = document.getElementById('knobOptIdx');
-      if (sel) {
-        sel.innerHTML = '';
-        var names = caps.optimizer_names || [];
-        for (var i = 0; i < numOpts; i++) {
-          var opt = document.createElement('option');
-          opt.value = i;
-          var label = names[i] ? names[i] : ('optimizer ' + i);
-          var pg = (caps.num_param_groups || [])[i];
-          if (pg) label += ' (' + pg + ' groups)';
-          opt.textContent = label;
-          sel.appendChild(opt);
-        }
-      }
-    }
-
-    // Loss state: show/hide loss controls based on detected keys
-    if (caps.mutable_state_detected && caps.mutable_state_keys && caps.mutable_state_keys.length > 0) {
-      // Show loss controls — they might be hidden if no demo config selected
-      var lossRows = document.querySelectorAll('[data-param="loss_w"]');
-      lossRows.forEach(function(el) { el.style.display = ''; });
-    }
-
-    // Grad clip info
-    if (caps.grad_clip_value !== null && caps.grad_clip_value !== undefined) {
-      var clipInfo = caps.grad_clip_wired ? 'wired' : 'advisory';
-    }
+    // Capabilities are now informational only — controls are generated from config.
   } catch(e) { /* ignore */ }
 }
 
 function syncSlidersFromApplied(params) {
   if (!params || typeof params !== 'object') return;
-  // Update applied knobs baseline so staged highlights reset
+  var panel = document.getElementById('knobPanel');
+  if (!panel) return;
+
   Object.keys(params).forEach(function(k) {
-    if (typeof params[k] === 'number') _appliedKnobs[k] = params[k];
+    var value = params[k];
+    if (typeof value !== 'number' && typeof value !== 'boolean' && typeof value !== 'string') return;
+
+    // Update baseline
+    _appliedKnobs[k] = value;
+
+    // Also check aliases: weight_decay -> weight_decay param key
+    var paramKey = k;
+
+    // Find the matching dynamic control row
+    var row = panel.querySelector('.knob-row[data-param="' + paramKey + '"]');
+    if (!row) return;
+
+    var slider = row.querySelector('.knob-slider');
+    var valEl = row.querySelector('.knob-val');
+    var toggle = row.querySelector('.knob-toggle');
+    var select = row.querySelector('.knob-select');
+
+    if (toggle && typeof value === 'boolean') {
+      toggle.checked = value;
+    } else if (select && typeof value === 'string') {
+      select.value = value;
+    } else if (slider && typeof value === 'number') {
+      if (slider.dataset.logScale === 'true' && value > 0) {
+        slider.value = Math.log10(value);
+        if (valEl) valEl.value = value.toExponential(2);
+      } else {
+        slider.value = value;
+        if (valEl) valEl.value = parseFloat(value).toFixed(2);
+      }
+    }
   });
 
-  // lr
-  if ('lr' in params && typeof params.lr === 'number' && params.lr > 0) {
-    var lrSlider = $('#knobLr');
-    var lrDisplay = $('#knobLrVal');
-    if (lrSlider && lrDisplay) {
-      lrSlider.value = Math.log10(params.lr);
-      lrDisplay.value = params.lr.toExponential(2);
-    }
-  }
-
-  // weight_decay / wd
-  var wd = ('weight_decay' in params) ? params.weight_decay : ('wd' in params ? params.wd : null);
-  if (wd !== null && typeof wd === 'number' && wd > 0) {
-    var wdSlider = $('#knobWd');
-    var wdDisplay = $('#knobWdVal');
-    if (wdSlider && wdDisplay) {
-      wdSlider.value = Math.log10(wd);
-      wdDisplay.value = wd.toExponential(2);
-    }
-  }
-
-  // weight / loss_w / weight_a (linear 0-1)
-  var lw = ('weight' in params) ? params.weight :
-           ('loss_w' in params) ? params.loss_w :
-           ('weight_a' in params) ? params.weight_a : null;
-  if (lw !== null && typeof lw === 'number') {
-    var lwSlider = $('#knobLossW');
-    var lwDisplay = $('#knobLossWVal');
-    if (lwSlider && lwDisplay) {
-      lwSlider.value = lw;
-      lwDisplay.value = parseFloat(lw).toFixed(2);
-    }
-  }
+  _markStagedChanges();
 }
 
 async function hydrateControlsFromServer() {
   try {
     var state = await api('GET', '/api/state/controls');
     if (!state) return;
+
+    // Build dynamic controls from server-provided controls list
+    if (state.controls && state.controls.length) {
+      buildControls(state.controls);
+      // Update S.config.controls so Apply handler can look up specs
+      if (S.config) S.config.controls = state.controls;
+    }
 
     // Demo mode gate: hide entire Training card when not in demo mode
     if (state.demo_mode === false) {
@@ -543,18 +682,7 @@ async function hydrateControlsFromServer() {
     if (state.last_opt_params) syncSlidersFromApplied(state.last_opt_params);
     if (state.last_loss_params) syncSlidersFromApplied(state.last_loss_params);
 
-    // Adaptive controls: hide modules not active for this training
-    var mods = state.modules_active || {opt: true, loss: false, cb: false};
-    if (!mods.loss) {
-      document.querySelectorAll('.single-loss-only, .multitask-only').forEach(function(el) {
-        el.style.display = 'none';
-      });
-    }
-    if (!mods.cb) {
-      document.querySelectorAll('.finetune-only').forEach(function(el) {
-        el.style.display = 'none';
-      });
-    }
+    // Module activity detection — controls are now dynamic, no CSS class hiding needed
 
     // External training: hide demo config dropdown, show attached label
     if (state.is_external) {

@@ -6,6 +6,7 @@ from transformers import TrainerCallback, TrainerControl, TrainerState, Training
 
 from hotcb.kernel import HotKernel
 from hotcb.capabilities import TrainingCapabilities, validate_mutable_state
+from hotcb.actuators import optimizer_actuators, mutable_state as make_mutable_state
 
 
 class HotCBHFCallback(TrainerCallback):
@@ -48,6 +49,15 @@ class HotCBHFCallback(TrainerCallback):
         self._capabilities = self._detect_capabilities(args, kwargs)
         if self.kernel.run_dir:
             self._capabilities.save(self.kernel.run_dir)
+        # Auto-create mutable_state from resolved optimizer if kernel doesn't have one
+        if self.kernel._mutable_state is None:
+            optimizers = self._resolve_all_optimizers()
+            if optimizers:
+                try:
+                    acts = optimizer_actuators(optimizers[0])
+                    self.kernel._mutable_state = make_mutable_state(acts)
+                except Exception:
+                    pass  # defensive — don't block training
         env = self._env(args, state, control, phase="train_begin", **kwargs)
         self.kernel.apply(env, events=["train_begin"])
         return control
