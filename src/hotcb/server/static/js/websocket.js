@@ -45,6 +45,32 @@ function connectWS() {
 
       if (ch === 'metrics') {
         if (typeof dismissChartWaiting === 'function') dismissChartWaiting();
+        // Skip WS initial burst for metrics — REST initialLoad() already fetched
+        // the full history (50k records). WS burst is only ~500 records and would
+        // cause duplicates / data loss. Only accept live incremental updates.
+        if (msg.initial) {
+          // Just update _lastSeenMaxStep from the burst so run-reset detection works
+          if (data.length > 0) {
+            var lastRec = data[data.length - 1];
+            var bStep = lastRec.step || 0;
+            if (bStep > _lastSeenMaxStep) _lastSeenMaxStep = bStep;
+          }
+          // Sync sliders from burst data if not yet done
+          if (!_slidersInitialized && data.length > 0) {
+            _slidersInitialized = true;
+            var last = data[data.length - 1];
+            var lm = last.metrics || {};
+            var syncObj = {};
+            var specs = (S.config && S.config.controls) || [];
+            specs.forEach(function(spec) {
+              if (lm[spec.param_key] !== undefined) syncObj[spec.param_key] = lm[spec.param_key];
+            });
+            if (lm.lr && lm.lr > 0) syncObj.lr = lm.lr;
+            if (lm.weight_decay && lm.weight_decay > 0) syncObj.weight_decay = lm.weight_decay;
+            if (Object.keys(syncObj).length > 0) syncSlidersFromApplied(syncObj);
+          }
+          return;  // skip adding initial burst data — already loaded via REST
+        }
         // Detect run reset: if incoming steps jump backwards, clear stale state
         if (data.length > 0) {
           var firstIncoming = data[0].step || 0;
@@ -75,9 +101,10 @@ function connectWS() {
             if (typeof value !== 'number') return;
             S.metricNames.add(name);
             if (!S.metricsData[name]) S.metricsData[name] = [];
-            S.metricsData[name].push({step: step, value: value});
-            // No client-side cap — keep all points.
-            // Downsampling for rendering happens in updateChart().
+            // Skip duplicate steps (can happen with REST + WS initial burst overlap)
+            var arr = S.metricsData[name];
+            if (arr.length > 0 && arr[arr.length - 1].step >= step) return;
+            arr.push({step: step, value: value});
           });
         });
         if (S.metricNames.size !== prevSize) {
@@ -87,16 +114,6 @@ function connectWS() {
         }
         updateChart();
         computeHealth();
-        // Sync slider knobs from initial metrics (once per training session)
-        if (!_slidersInitialized && data.length > 0) {
-          _slidersInitialized = true;
-          var last = data[data.length - 1];
-          var lm = last.metrics || {};
-          var syncObj = {};
-          if (lm.lr && lm.lr > 0) syncObj.lr = lm.lr;
-          if (lm.weight_decay && lm.weight_decay > 0) syncObj.weight_decay = lm.weight_decay;
-          if (Object.keys(syncObj).length > 0) syncSlidersFromApplied(syncObj);
-        }
         // Update step counter
         var maxStep = 0;
         S.metricNames.forEach(function(name) {

@@ -13,7 +13,9 @@ var _highlightedMutationStep = null;
 var _chartStepRange = 'all';
 
 // Y-axis normalization: when enabled, each metric is normalized to [0,1]
+// Auto-detected on first data: true if metrics have divergent scales
 var _chartNormalize = false;
+var _chartNormalizeAuto = true;  // auto-detection active until user manually toggles
 
 // Max points to render per dataset (avoids sluggish charts on very long runs)
 var _maxRenderPoints = (S.config && S.config.chart) ? S.config.chart.max_render_points : 2000;
@@ -375,11 +377,16 @@ function createMetricsChart() {
         tooltip: { backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--bg-card').trim() || '#121c2b',
                    borderColor: getComputedStyle(document.documentElement).getPropertyValue('--border-bright').trim() || '#2a4060', borderWidth:1,
                    titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:11},
-                   usePointStyle: true, boxWidth: 8, boxHeight: 8,
-                   intersect: false, mode: 'nearest', axis: 'x', position: 'rightOfCursor',
-                   itemSort: function(a, b, data) {
+                   usePointStyle: false, boxWidth: 12, boxHeight: 2,
+                   intersect: false, mode: 'index', axis: 'x', position: 'rightOfCursor',
+                   filter: function(item) {
+                     // Hide internal datasets (confidence bands, etc.)
+                     var label = item.dataset.label || '';
+                     return !label.startsWith('_');
+                   },
+                   itemSort: function(a, b) {
                      // Sort tooltip items by Y-pixel distance to cursor (TensorBoard-style)
-                     var chart = a.chart || (data && data.chart);
+                     var chart = a.chart;
                      var cursorY = 0;
                      if (chart && chart._lastEvent) cursorY = chart._lastEvent.y;
                      var ay = a.element ? a.element.y : 0;
@@ -390,15 +397,16 @@ function createMetricsChart() {
                      label: function(ctx) {
                        var ds = ctx.dataset;
                        var label = ds.label || '';
-                       // Skip internal datasets (confidence bands)
                        if (label.startsWith('_')) return null;
                        var rawY = ctx.parsed.y;
+                       // Color swatch via dataset borderColor
+                       var color = ds.borderColor || '#fff';
+                       var prefix = '';
                        // When normalized, show both normalized and raw values
                        if (_chartNormalize) {
                          var metricName = label.replace(/ forecast$/, '').replace(/ post-change$/, '');
                          var rawPts = S.metricsData[metricName];
                          if (rawPts && rawPts.length > 0) {
-                           // Find raw value at nearest step
                            var step = ctx.parsed.x;
                            var rawVal = null;
                            for (var i = 0; i < rawPts.length; i++) {
@@ -406,16 +414,16 @@ function createMetricsChart() {
                              rawVal = rawPts[i].value;
                            }
                            if (rawVal !== null) {
-                             return label + ': ' + fmtNum(rawVal) + ' (norm: ' + rawY.toFixed(3) + ')';
+                             return ' ' + label + ': ' + fmtNum(rawVal);
                            }
                          }
                        }
-                       return label + ': ' + fmtNum(rawY);
+                       return ' ' + label + ': ' + fmtNum(rawY);
                      }
                    }
         }
       },
-      interaction: { mode: 'nearest', axis: 'x', intersect: false },
+      interaction: { mode: 'index', axis: 'x', intersect: false },
       elements: { point: {radius:0, hoverRadius:5, hitRadius:10}, line: {borderWidth:1.5, tension: (S.config && S.config.chart) ? S.config.chart.line_tension : 0.15} }
     }
   });
@@ -423,6 +431,44 @@ function createMetricsChart() {
 
 function updateChart() {
   if (!S.chartInstance) return;
+
+  // Auto-detect normalization need: if enabled metrics span > 100x range, auto-enable
+  if (_chartNormalizeAuto) {
+    var globalMin = Infinity, globalMax = -Infinity;
+    var metricRanges = [];
+    S.metricNames.forEach(function(name) {
+      if (!_metricToggleState[name]) return;
+      var pts = S.metricsData[name] || [];
+      if (pts.length < 2) return;
+      var mn = Infinity, mx = -Infinity;
+      for (var i = Math.max(0, pts.length - 100); i < pts.length; i++) {
+        if (pts[i].value < mn) mn = pts[i].value;
+        if (pts[i].value > mx) mx = pts[i].value;
+      }
+      metricRanges.push({min: mn, max: mx});
+      if (mn < globalMin) globalMin = mn;
+      if (mx > globalMax) globalMax = mx;
+    });
+    if (metricRanges.length >= 2) {
+      // Check if the max range across metrics is > 100x the min range
+      var spans = metricRanges.map(function(r) { return Math.abs(r.max - r.min) || 1e-10; });
+      var maxSpan = Math.max.apply(null, spans);
+      var minSpan = Math.min.apply(null, spans);
+      var needsNorm = (maxSpan / minSpan > 50) || (Math.abs(globalMax - globalMin) > 0 && (
+        metricRanges.some(function(r) {
+          var mid = (r.max + r.min) / 2;
+          var halfRange = (globalMax - globalMin) / 2;
+          return halfRange > 0 && Math.abs(r.max - r.min) / halfRange < 0.01;
+        })
+      ));
+      if (needsNorm !== _chartNormalize) {
+        _chartNormalize = needsNorm;
+        var normBtn = document.getElementById('btnNormalize');
+        if (normBtn) normBtn.classList.toggle('btn-accent', _chartNormalize);
+      }
+    }
+  }
+
   var datasets = [];
   var enabled = new Set();
   S.metricNames.forEach(function(name) {
@@ -452,8 +498,10 @@ function updateChart() {
       ? function(v) { return (v - metricMin) / (metricMax - metricMin); }
       : function(v) { return v; };
 
-    // Live data line (LTTB-downsampled for rendering performance)
+    // Live data line — sort by step to prevent backward line connectors
+    // (validation records can appear between training steps with lower step numbers)
     var chartPts = pts.map(function(p) { return {x: p.step, y: _normFn(p.value)}; });
+    chartPts.sort(function(a, b) { return a.x - b.x; });
     chartPts = _lttbDownsample(chartPts, _maxRenderPoints);
     var _cfgTension = (S.config && S.config.chart) ? S.config.chart.line_tension : 0.15;
     var _cfgForecastDash = (S.config && S.config.chart) ? S.config.chart.forecast_dash : [6, 3];
@@ -890,19 +938,17 @@ function _renderMetricDropdown(container) {
     row.appendChild(dot);
     row.appendChild(label);
 
-    // Pin indicator — visible icon when metric is pinned
-    if (isPinned) {
-      var pinIcon = document.createElement('span');
-      pinIcon.className = 'metric-pin-icon';
-      pinIcon.textContent = '\u{1F4CC}';
-      pinIcon.title = 'Pinned \u2014 double-click dot to unpin';
-      pinIcon.addEventListener('click', function(e) {
-        e.stopPropagation();
-        toggleMetricCard(name);
-        _renderMetricDropdown(container);
-      });
-      row.appendChild(pinIcon);
-    }
+    // Pin button — always visible, toggles pinned state
+    var pinIcon = document.createElement('span');
+    pinIcon.className = 'metric-pin-icon' + (isPinned ? ' pinned' : '');
+    pinIcon.textContent = '\u{1F4CC}';
+    pinIcon.title = isPinned ? 'Unpin metric' : 'Pin metric (opens mini card)';
+    pinIcon.addEventListener('click', function(e) {
+      e.stopPropagation();
+      toggleMetricCard(name);
+      _renderMetricDropdown(container);
+    });
+    row.appendChild(pinIcon);
 
     list.appendChild(row);
   });

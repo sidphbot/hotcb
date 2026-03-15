@@ -323,12 +323,16 @@ class TestControlsFromMutableState:
             assert "group" in c
             assert "current" in c
 
-    def test_config_controls_empty_when_no_mutable_state(self, client_no_ms):
-        """No MutableState -> controls is []."""
+    def test_config_controls_defaults_when_no_mutable_state(self, client_no_ms):
+        """No MutableState -> default optimizer controls are returned."""
         r = client_no_ms.get("/api/config")
         assert r.status_code == 200
         data = r.json()
-        assert data["controls"] == []
+        # Should have default lr and weight_decay controls
+        assert len(data["controls"]) >= 2
+        keys = [c["param_key"] for c in data["controls"]]
+        assert "lr" in keys
+        assert "weight_decay" in keys
 
     def test_config_controls_types_match_actuators(
         self, tmp_run_dir, _make_mutable_state
@@ -401,12 +405,15 @@ class TestControlsFromMutableState:
         assert val_map["lr"] == pytest.approx(1e-3)
         assert val_map["recon_w"] == pytest.approx(1.0)
 
-    def test_control_state_endpoint_empty_when_no_ms(self, client_no_ms):
-        """GET /api/state/controls returns empty controls when no MutableState."""
+    def test_control_state_endpoint_defaults_when_no_ms(self, client_no_ms):
+        """GET /api/state/controls returns default controls when no MutableState."""
         r = client_no_ms.get("/api/state/controls")
         assert r.status_code == 200
         data = r.json()
-        assert data["controls"] == []
+        # Should have default lr and weight_decay controls
+        assert len(data["controls"]) >= 2
+        keys = [c["param_key"] for c in data["controls"]]
+        assert "lr" in keys
 
 
 class TestControlsFromMutableStateFunction:

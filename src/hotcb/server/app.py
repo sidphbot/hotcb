@@ -353,14 +353,22 @@ def create_app(
         Controls are populated live from MutableState when available,
         falling back to reconstructed controls from the applied ledger.
         """
-        from .config import controls_from_mutable_state, controls_from_applied_ledger
+        from .config import controls_from_mutable_state, controls_from_actuator_file, controls_from_applied_ledger, controls_from_capabilities, default_optimizer_controls
 
         d = app.state.config.to_dict()
         ms = getattr(app.state, "mutable_state", None)
         if ms is not None:
             d["controls"] = controls_from_mutable_state(ms)
         elif not d.get("controls"):
-            d["controls"] = controls_from_applied_ledger(app.state.config.run_dir)
+            rd = app.state.config.run_dir
+            ctrls = controls_from_actuator_file(rd)
+            if not ctrls:
+                ctrls = controls_from_applied_ledger(rd)
+            if not ctrls:
+                ctrls = controls_from_capabilities(rd)
+            if not ctrls:
+                ctrls = default_optimizer_controls()
+            d["controls"] = ctrls
         return d
 
     @app.get("/api/status")
@@ -586,10 +594,18 @@ def create_app(
             "cb": "cb" in modules_seen,
         }
 
-        # Live controls from MutableState, or fallback to applied ledger
-        from .config import controls_from_mutable_state, controls_from_applied_ledger
+        # Live controls from MutableState, actuator file, applied ledger, or capabilities
+        from .config import controls_from_mutable_state, controls_from_actuator_file, controls_from_applied_ledger, controls_from_capabilities, default_optimizer_controls
         live_controls = controls_from_mutable_state(ms)
-        state["controls"] = live_controls if live_controls else controls_from_applied_ledger(rd)
+        if not live_controls:
+            live_controls = controls_from_actuator_file(rd)
+        if not live_controls:
+            live_controls = controls_from_applied_ledger(rd)
+        if not live_controls:
+            live_controls = controls_from_capabilities(rd)
+        if not live_controls:
+            live_controls = default_optimizer_controls()
+        state["controls"] = live_controls
 
         # External training detection
         is_launcher = training_launcher.running or bool(

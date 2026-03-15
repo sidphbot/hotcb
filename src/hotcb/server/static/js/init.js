@@ -180,10 +180,11 @@ async function initialLoad() {
   initCompare();
   createMetricsChart();
   initStepRangeControls();
-  // Normalize toggle
+  // Normalize toggle — manual click disables auto-detection
   var normBtn = document.getElementById('btnNormalize');
   if (normBtn) {
     normBtn.addEventListener('click', function() {
+      _chartNormalizeAuto = false;  // user took control
       _chartNormalize = !_chartNormalize;
       normBtn.classList.toggle('btn-accent', _chartNormalize);
       updateChart();

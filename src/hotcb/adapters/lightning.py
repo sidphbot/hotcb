@@ -239,7 +239,7 @@ class HotCBLightning(pl.Callback):
         env: Dict[str, Any] = {
             "framework": "lightning",
             "phase": phase,
-            "step": int(getattr(trainer, "global_step", 0)),
+            "step": int(getattr(pl_module, "_opt_step_count", 0) or getattr(trainer, "global_step", 0)),
             "epoch": int(getattr(trainer, "current_epoch", 0)),
             "model": pl_module,
             "trainer": trainer,

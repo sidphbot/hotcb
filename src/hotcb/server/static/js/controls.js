@@ -395,9 +395,25 @@ function initControls() {
   $('#btnScheduleSubmit').addEventListener('click', async function() {
     var step = parseInt($('#schedStep').value);
     if (!step || step <= 0) return;
-    var lr = lrFromSlider($('#knobLr').value);
-    var wd = Math.pow(10, parseFloat($('#knobWd').value));
-    await api('POST', '/api/schedule', {at_step: step, module: 'opt', op: 'set_params', params: {lr: lr, weight_decay: wd}});
+    // Collect current values from all dynamic controls
+    var panel = document.getElementById('knobPanel');
+    var params = {};
+    if (panel) {
+      panel.querySelectorAll('.knob-row[data-param]').forEach(function(row) {
+        var param = row.dataset.param;
+        var val = _readKnobValue(row);
+        if (val !== undefined) params[param] = val;
+      });
+    }
+    if (Object.keys(params).length === 0) {
+      alert('No control values to schedule. Adjust controls first.');
+      return;
+    }
+    // Determine module from first param's group
+    var firstKey = Object.keys(params)[0];
+    var spec = _getControlSpec(firstKey);
+    var module = (spec && spec.group === 'loss') ? 'loss' : 'opt';
+    await api('POST', '/api/schedule', {at_step: step, module: module, op: 'set_params', params: params});
     closeModal('modalSchedule');
   });
 
@@ -600,6 +616,30 @@ function initControls() {
 
   // Hydrate controls from server state (works for both launcher and external training)
   hydrateControlsFromServer().then(function() { _snapshotAppliedKnobs(); });
+
+  // Poll for controls periodically — actuator file may appear after training starts.
+  // Keep polling until we get MORE controls than the defaults (lr + weight_decay = 2).
+  var _controlsPollCount = 0;
+  var _controlsPollMax = 30;  // stop after ~90 seconds
+  setInterval(function() {
+    _controlsPollCount++;
+    if (_controlsPollCount > _controlsPollMax) return;
+    var currentCount = (S.config && S.config.controls) ? S.config.controls.length : 0;
+    api('GET', '/api/state/controls').then(function(state) {
+      if (!state || !state.controls || !state.controls.length) return;
+      // Only rebuild if we got MORE controls or controls changed
+      if (state.controls.length <= currentCount && currentCount > 2) return;
+      if (state.controls.length > currentCount || currentCount <= 2) {
+        buildControls(state.controls);
+        if (S.config) S.config.controls = state.controls;
+        if (state.last_opt_params) syncSlidersFromApplied(state.last_opt_params);
+        if (state.last_loss_params) syncSlidersFromApplied(state.last_loss_params);
+        _snapshotAppliedKnobs();
+        // Stop polling once we have real controls (more than defaults)
+        if (state.controls.length > 2) _controlsPollCount = _controlsPollMax + 1;
+      }
+    });
+  }, 3000);
 }
 
 /* ================================================================ */

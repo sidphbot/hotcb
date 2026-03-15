@@ -266,6 +266,27 @@ def controls_from_mutable_state(ms: Any) -> list:
         return []
 
 
+def controls_from_actuator_file(run_dir: str) -> list:
+    """Read actuator descriptions from hotcb.actuators.json.
+
+    The kernel writes this file on startup and after mutations so the
+    dashboard server can discover controls without a live MutableState
+    reference (filesystem IPC).
+    """
+    import json
+    import os
+
+    path = os.path.join(run_dir, "hotcb.actuators.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("controls", [])
+    except Exception:
+        return []
+
+
 def controls_from_applied_ledger(run_dir: str) -> list:
     """Reconstruct control specs from applied JSONL when MutableState is unavailable.
 
@@ -376,6 +397,158 @@ def controls_from_applied_ledger(run_dir: str) -> list:
             })
 
     return controls
+
+
+def controls_from_capabilities(run_dir: str) -> list:
+    """Generate controls from hotcb.capabilities.json mutable_state_keys.
+
+    Used when an external training (Lightning/HF) registered mutable state
+    but didn't write hotcb.actuators.json (e.g., older kernel or adapter).
+    Infers control types from key names (lambda/weight → float, ramp/lr → log_float).
+    Also reads latest metrics for current values.
+    """
+    import json
+
+    caps_path = os.path.join(run_dir, "hotcb.capabilities.json")
+    if not os.path.exists(caps_path):
+        return []
+    try:
+        with open(caps_path, "r", encoding="utf-8") as f:
+            caps = json.load(f)
+    except Exception:
+        return []
+
+    keys = caps.get("mutable_state_keys", [])
+    if not keys:
+        return []
+
+    # Read latest metrics for current values
+    latest_metrics: dict = {}
+    metrics_path = os.path.join(run_dir, "hotcb.metrics.jsonl")
+    if os.path.exists(metrics_path):
+        try:
+            with open(metrics_path, "rb") as f:
+                f.seek(max(0, os.path.getsize(metrics_path) - 4096))
+                tail = f.read().decode("utf-8", errors="replace")
+            for line in tail.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    latest_metrics.update(rec.get("metrics", {}))
+                except json.JSONDecodeError:
+                    pass
+        except Exception:
+            pass
+
+    # Detect optimizer names for lr controls
+    opt_names = caps.get("optimizer_names", [])
+
+    controls = []
+
+    # Add lr controls per optimizer
+    for i, opt_name in enumerate(opt_names):
+        key = "lr" if i == 0 else f"lr_{i}"
+        current = latest_metrics.get(key, latest_metrics.get("lr", 1e-3))
+        controls.append({
+            "param_key": key,
+            "type": "log_float",
+            "label": f"lr ({opt_name})" if len(opt_names) > 1 else "lr",
+            "group": "optimizer",
+            "min": 1e-7,
+            "max": 1.0,
+            "step": 0.01,
+            "log_base": 10,
+            "choices": None,
+            "current": current,
+            "state": "untouched",
+        })
+
+    # Add mutable state keys
+    for key in keys:
+        current = latest_metrics.get(key, 1.0)
+        # Infer type from name
+        is_log = key.startswith("lr") or key == "weight_decay" or key == "wd"
+        is_ramp = key.startswith("ramp_") or key.endswith("_end") or key.endswith("_start")
+
+        if is_log:
+            controls.append({
+                "param_key": key,
+                "type": "log_float",
+                "label": key,
+                "group": "optimizer",
+                "min": 1e-7,
+                "max": 1.0,
+                "step": 0.01,
+                "log_base": 10,
+                "choices": None,
+                "current": current,
+                "state": "untouched",
+            })
+        elif is_ramp:
+            controls.append({
+                "param_key": key,
+                "type": "float",
+                "label": key,
+                "group": "scheduler",
+                "min": 0,
+                "max": max(5000, current * 2) if isinstance(current, (int, float)) else 5000,
+                "step": 1,
+                "log_base": None,
+                "choices": None,
+                "current": current,
+                "state": "untouched",
+            })
+        else:
+            # lambda_*, aug_*, or other float params
+            controls.append({
+                "param_key": key,
+                "type": "float",
+                "label": key,
+                "group": "loss" if key.startswith("lambda") else "training",
+                "min": 0.0,
+                "max": max(10.0, current * 3) if isinstance(current, (int, float)) else 10.0,
+                "step": 0.01,
+                "log_base": None,
+                "choices": None,
+                "current": current,
+                "state": "untouched",
+            })
+
+    return controls
+
+
+def default_optimizer_controls() -> list:
+    """Return default optimizer controls as a last-resort fallback."""
+    return [
+        {
+            "param_key": "lr",
+            "type": "log_float",
+            "label": "lr",
+            "group": "optimizer",
+            "min": 1e-7,
+            "max": 1.0,
+            "step": 0.01,
+            "log_base": 10,
+            "choices": None,
+            "current": 1e-3,
+            "state": "untouched",
+        },
+        {
+            "param_key": "weight_decay",
+            "type": "log_float",
+            "label": "weight_decay",
+            "group": "optimizer",
+            "min": 1e-7,
+            "max": 1.0,
+            "step": 0.01,
+            "log_base": 10,
+            "choices": None,
+            "current": 1e-4,
+            "state": "untouched",
+        },
+    ]
 
 
 # ---------------------------------------------------------------------------

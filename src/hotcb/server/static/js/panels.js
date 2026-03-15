@@ -1305,8 +1305,12 @@ function _rebuildCompareChart() {
                 tooltip: {
                     backgroundColor:'#121c2b', borderColor:'#2a4060', borderWidth:1,
                     titleFont:{family:'JetBrains Mono',size:11}, bodyFont:{family:'JetBrains Mono',size:10},
-                    usePointStyle: true, boxWidth: 8, boxHeight: 8,
-                    intersect: false, mode: 'nearest', axis: 'x',
+                    usePointStyle: false, boxWidth: 12, boxHeight: 2,
+                    intersect: false, mode: 'index', axis: 'x',
+                    filter: function(item) {
+                      var label = item.dataset.label || '';
+                      return label.indexOf('mutations') === -1;
+                    },
                     itemSort: function(a, b) {
                       var chart = a.chart;
                       var cursorY = (chart && chart._lastEvent) ? chart._lastEvent.y : 0;
@@ -1339,9 +1343,9 @@ function _rebuildCompareChart() {
                             var ds = ctx.dataset;
                             var val = typeof ctx.parsed.y === 'number' ? ctx.parsed.y.toPrecision(5) : ctx.parsed.y;
                             if (_compareNormalize && raw && raw._rawY !== undefined) {
-                                return ds.label + ': ' + (typeof fmtNum === 'function' ? fmtNum(raw._rawY) : raw._rawY.toPrecision(5)) + ' (norm: ' + parseFloat(val).toFixed(3) + ')';
+                                return ' ' + ds.label + ': ' + fmtNum(raw._rawY);
                             }
-                            return ds.label + ': ' + val;
+                            return ' ' + ds.label + ': ' + val;
                         }
                     }
                 },

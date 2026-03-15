@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 import traceback as tb_mod
@@ -66,6 +67,7 @@ class HotKernel:
         self._cmd_cursor = FileCursor(path=self.commands_path, offset=0)
 
         self._actuators: Dict[str, BaseActuator] = {}
+        self._actuators_written = False  # track if we've written the actuator description file
 
         self.modules: Dict[str, object] = {
             "cb": CallbackModule(auto_disable_on_error=auto_disable_on_error, log_path=self.log_path, source_capture_dir=self.sources_dir),
@@ -99,6 +101,24 @@ class HotKernel:
 
     def list_actuators(self) -> Dict[str, BaseActuator]:
         return dict(self._actuators)
+
+    def _write_actuator_descriptions(self) -> None:
+        """Write actuator descriptions to hotcb.actuators.json for server consumption.
+
+        This bridges the MutableState from the training process to the dashboard
+        server via filesystem IPC.  Called once after first apply() and whenever
+        actuators change.
+        """
+        if self._mutable_state is None:
+            return
+        try:
+            descs = self._mutable_state.describe_all()
+            path = os.path.join(self.run_dir, "hotcb.actuators.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"controls": descs}, f)
+            self._actuators_written = True
+        except Exception:
+            pass  # never crash training
 
     def _should_poll(self) -> bool:
         if self.poll_interval_sec > 0.0:
@@ -144,6 +164,12 @@ class HotKernel:
         current_step = int(env.get("step", self._step_counter) or self._step_counter)
         events = events or []
         default_event = events[0] if events else "unknown"
+
+        # Write actuator descriptions on first step so the dashboard can discover controls
+        if not self._actuators_written and self._mutable_state is not None:
+            if self._step_counter == 1:
+                self._mutable_state.initialize(env)
+            self._write_actuator_descriptions()
 
         pending: List[Tuple[HotOp, str]] = []
         if self._should_poll():
@@ -326,6 +352,8 @@ class HotKernel:
                     payload=applied_params, env=env,
                     notes="; ".join(errors) if errors else None,
                 )
+                # Update actuator file so dashboard sees new current values
+                self._write_actuator_descriptions()
             elif errors:
                 self._write_ledger(
                     op, event, step, decision="failed",
